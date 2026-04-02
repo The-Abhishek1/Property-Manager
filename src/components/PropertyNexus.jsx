@@ -1,15 +1,112 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { Search, Plus, Home, BarChart3, Map, Heart, Bell, Settings, ChevronLeft, ChevronRight, Filter, X, Edit, Trash2, Eye, Star, MapPin, Phone, User, Calendar, DollarSign, TrendingUp, Building2, Landmark, TreePine, FileText, Tag, ArrowUpRight, ArrowDownRight, MoreHorizontal, CheckCircle, Clock, AlertCircle, Layers, Download, ChevronDown, Menu, LogOut, Shield, Activity, Bookmark, MessageSquare, Upload, Grid, List, SlidersHorizontal, Copy, ExternalLink, IndianRupee, SquareStack, Compass, Maximize2, LayoutDashboard, FolderOpen, Users, BellRing, ScrollText, Lock, Zap, Sparkles, CircleDot } from "lucide-react";
-import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { ref, onValue, push, set, update, remove } from "firebase/database";
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged,
+  updateProfile,
+} from "firebase/auth";
+import { rtdb, auth } from "../config/firebase";
+import {
+  Search, Plus, Home, BarChart3, Map, Heart, Bell, Settings, ChevronLeft,
+  Filter, X, Edit, Trash2, Eye, MapPin, Phone, User, DollarSign, TrendingUp,
+  Building2, Landmark, TreePine, FileText, Tag, ArrowUpRight, CheckCircle,
+  Clock, AlertCircle, Layers, Menu, Shield, Activity, Upload, Grid, List,
+  SlidersHorizontal, Compass, Maximize2, LayoutDashboard, FolderOpen, Users,
+  ScrollText, Loader2, Save, Image as ImageIcon
+} from "lucide-react";
+import {
+  AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
+} from "recharts";
 
-// ── Helpers ──
-const generateId = () => "p_" + Math.random().toString(36).substr(2, 9);
-const formatCurrency = (n) => {
-  if (n >= 10000000) return `₹${(n / 10000000).toFixed(2)} Cr`;
-  if (n >= 100000) return `₹${(n / 100000).toFixed(2)} L`;
+// Upload via Next.js API route — Cloudinary api_secret stays server-side only.
+const uploadToCloudinary = async (file, propertyId = "general") => {
+  const type = file.type.startsWith("video/") ? "video" : "image";
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("propertyId", propertyId);
+  formData.append("type", type);
+
+  const res = await fetch("/api/upload", { method: "POST", body: formData });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Upload failed (${res.status})`);
+  }
+
+  const data = await res.json();
+  // Returns { url, thumbnailUrl, resourceType, publicId, name }
+  return data;
+};
+
+// ═══════════════════════════════════════════════════════════
+// FIREBASE REALTIME DATABASE — CRUD OPERATIONS
+// ═══════════════════════════════════════════════════════════
+const fbSub = (path, cb) => {
+  const r = ref(rtdb, path);
+  return onValue(r, (snap) => {
+    const d = snap.val();
+    if (d) {
+      const arr = Object.entries(d).map(([id, v]) => ({ ...v, id }));
+      cb(arr.sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")));
+    } else {
+      cb([]);
+    }
+  });
+};
+
+const fbPush = async (path, data) => {
+  const r = ref(rtdb, path);
+  const n = push(r);
+  await set(n, { ...data, id: n.key });
+  return n.key;
+};
+
+const fbUpdate = async (path, data) => {
+  const r = ref(rtdb, path);
+  await update(r, data);
+};
+
+const fbRemove = async (path) => {
+  const r = ref(rtdb, path);
+  await remove(r);
+};
+
+const addAudit = async (action, details, userName = "System") => {
+  try {
+    await fbPush("auditLogs", {
+      action, details, userName,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) { console.error("Audit error:", e); }
+};
+
+const addNotif = async (type, message, pid) => {
+  try {
+    await fbPush("notifications", {
+      type, message, propertyId: pid || "",
+      read: false, createdAt: new Date().toISOString(),
+    });
+  } catch (e) { console.error("Notif error:", e); }
+};
+
+// ═══════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════
+const gid = () => "p_" + Math.random().toString(36).substr(2, 9);
+
+const fmt = (n) => {
+  if (!n && n !== 0) return "₹0";
+  n = Number(n);
+  if (n >= 1e7) return `₹${(n / 1e7).toFixed(2)} Cr`;
+  if (n >= 1e5) return `₹${(n / 1e5).toFixed(2)} L`;
   return `₹${n.toLocaleString("en-IN")}`;
 };
-const timeAgo = (d) => {
+
+const ago = (d) => {
+  if (!d) return "";
   const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
   if (s < 60) return "just now";
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
@@ -17,211 +114,599 @@ const timeAgo = (d) => {
   return `${Math.floor(s / 86400)}d ago`;
 };
 
-// ── Sample Data ──
-const SAMPLE_PROPERTIES = [
-  { id:"prop_001", title:"2 Acre Premium Farm Land", type:"land", category:"agricultural", description:"Beautiful 2 acre farm land with fertile soil, water supply, and road access. Ideal for organic farming or weekend retreat. Located near upcoming Bangalore-Chennai expressway.", price:4500000, previousPrice:4000000, pricePerUnit:55, priceUnit:"sqft", size:2, sizeUnit:"acres", status:"available", owner:"Rajesh Kumar", ownerContact:"+91 98765 43210", country:"India", state:"Karnataka", city:"Bangalore", area:"Devanahalli", pincode:"562110", lat:13.2468, lng:77.7120, images:["https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=800","https://images.unsplash.com/photo-1625246333195-78d9c38ad449?w=800","https://images.unsplash.com/photo-1464226184884-fa280b87c399?w=800"], coverImage:0, tags:["investment","prime-location","near-highway"], facing:"east", nearHighway:true, cornerSite:false, approved:true, notes:[{id:"n1",text:"Owner ready to negotiate on price",createdAt:"2025-03-15T10:30:00Z",author:"Admin"}], buyers:[{id:"b1",name:"Suresh Patel",contact:"+91 87654 32109",notes:"Interested, visiting next week",addedAt:"2025-03-20T14:00:00Z"}], negotiationNotes:"Owner asking 45L, market rate is 40L.", views:234, isFavorite:true, createdAt:"2025-01-15T08:00:00Z", updatedAt:"2025-03-25T16:00:00Z" },
-  { id:"prop_002", title:"30x40 Corner Site - Yelahanka", type:"plot", category:"residential", description:"BDA approved 30x40 corner site in a premium gated layout with all amenities. Clear title, ready for construction.", price:7200000, pricePerUnit:6000, priceUnit:"sqft", size:1200, sizeUnit:"sqft", status:"available", owner:"Meena Sharma", ownerContact:"+91 99887 76655", country:"India", state:"Karnataka", city:"Bangalore", area:"Yelahanka", pincode:"560064", lat:13.1007, lng:77.5963, images:["https://images.unsplash.com/photo-1558618666-fcd25c85f82e?w=800","https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=800"], coverImage:0, tags:["corner-site","approved","prime-location"], facing:"north", nearHighway:false, cornerSite:true, approved:true, notes:[], buyers:[], negotiationNotes:"", views:567, isFavorite:false, createdAt:"2025-02-01T09:00:00Z", updatedAt:"2025-03-20T12:00:00Z" },
-  { id:"prop_003", title:"3BHK Villa - Whitefield", type:"house", category:"residential", description:"Luxurious 3BHK independent villa with garden, car parking, and modern interiors in a gated community near ITPL.", price:18500000, previousPrice:17000000, pricePerUnit:8500, priceUnit:"sqft", size:2200, sizeUnit:"sqft", status:"on-hold", owner:"Anand Verma", ownerContact:"+91 77665 54433", country:"India", state:"Karnataka", city:"Bangalore", area:"Whitefield", pincode:"560066", lat:12.9698, lng:77.7500, images:["https://images.unsplash.com/photo-1613490493576-7fde63acd811?w=800","https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=800","https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=800"], coverImage:0, tags:["luxury","gated-community"], facing:"west", nearHighway:false, cornerSite:false, approved:true, notes:[{id:"n2",text:"Buyer finalizing loan approval",createdAt:"2025-03-22T11:00:00Z",author:"Admin"}], buyers:[{id:"b2",name:"Vikram Singh",contact:"+91 88990 01122",notes:"Loan approved, registration pending",addedAt:"2025-03-10T09:00:00Z"}], negotiationNotes:"Deal almost closed at 1.85Cr", views:892, isFavorite:true, createdAt:"2025-01-20T10:00:00Z", updatedAt:"2025-03-22T11:00:00Z" },
-  { id:"prop_004", title:"Commercial Space - MG Road", type:"commercial", category:"commercial", description:"Prime commercial space on MG Road. Suitable for retail, office, or showroom. High footfall area with metro connectivity.", price:35000000, pricePerUnit:18000, priceUnit:"sqft", size:1950, sizeUnit:"sqft", status:"available", owner:"Prakash Industries", ownerContact:"+91 66554 43322", country:"India", state:"Karnataka", city:"Bangalore", area:"MG Road", pincode:"560001", lat:12.9756, lng:77.6068, images:["https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=800","https://images.unsplash.com/photo-1497366216548-37526070297c?w=800"], coverImage:0, tags:["prime-location","investment","high-roi"], nearHighway:false, cornerSite:true, approved:true, notes:[], buyers:[], negotiationNotes:"", views:1203, isFavorite:false, createdAt:"2025-02-15T08:00:00Z", updatedAt:"2025-03-18T15:00:00Z" },
-  { id:"prop_005", title:"5 Acre Agricultural Land", type:"land", category:"agricultural", description:"Spacious 5 acre agricultural land on Mysore Road with borewell and electricity. Perfect for farming or future development.", price:8000000, previousPrice:7500000, pricePerUnit:37, priceUnit:"sqft", size:5, sizeUnit:"acres", status:"sold", owner:"Ravi Gowda", ownerContact:"+91 55443 32211", country:"India", state:"Karnataka", city:"Bangalore", area:"Mysore Road", pincode:"562130", lat:12.8500, lng:77.4000, images:["https://images.unsplash.com/photo-1500382017468-9049fed747ef?w=800"], coverImage:0, tags:["investment"], nearHighway:true, cornerSite:false, approved:true, notes:[], buyers:[], finalSellingPrice:7800000, soldDate:"2025-03-01", negotiationNotes:"Sold at 78L", views:456, isFavorite:false, createdAt:"2024-12-01T08:00:00Z", updatedAt:"2025-03-01T10:00:00Z" },
-  { id:"prop_006", title:"40x60 Plot - Electronic City", type:"plot", category:"residential", description:"BMRDA approved 40x60 plot near Electronic City Phase 2. Close to IT parks, metro station, and schools.", price:5400000, pricePerUnit:2250, priceUnit:"sqft", size:2400, sizeUnit:"sqft", status:"available", owner:"Sunita Reddy", ownerContact:"+91 44332 21100", country:"India", state:"Karnataka", city:"Bangalore", area:"Electronic City", pincode:"560100", lat:12.8440, lng:77.6593, images:["https://images.unsplash.com/photo-1558618666-fcd25c85f82e?w=800"], coverImage:0, tags:["approved","near-it-park"], facing:"south", nearHighway:true, cornerSite:false, approved:true, notes:[], buyers:[], negotiationNotes:"", views:345, isFavorite:false, createdAt:"2025-03-01T08:00:00Z", updatedAt:"2025-03-25T10:00:00Z" },
-  { id:"prop_007", title:"Penthouse - Indiranagar", type:"house", category:"residential", description:"Ultra-luxury 4BHK penthouse with rooftop pool, 360-degree city views, smart home automation, and premium finishes.", price:45000000, pricePerUnit:22000, priceUnit:"sqft", size:2050, sizeUnit:"sqft", status:"available", owner:"Kiran Desai", ownerContact:"+91 99001 22334", country:"India", state:"Karnataka", city:"Bangalore", area:"Indiranagar", pincode:"560038", lat:12.9784, lng:77.6408, images:["https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=800","https://images.unsplash.com/photo-1600566753190-17f0baa2a6c3?w=800"], coverImage:0, tags:["luxury","prime-location","investment"], facing:"east", nearHighway:false, cornerSite:false, approved:true, notes:[{id:"n3",text:"Premium property - handle with care",createdAt:"2025-03-20T09:00:00Z",author:"Admin"}], buyers:[], negotiationNotes:"", views:1876, isFavorite:true, createdAt:"2025-03-10T08:00:00Z", updatedAt:"2025-03-28T14:00:00Z" },
-  { id:"prop_008", title:"Warehouse - Peenya Industrial", type:"commercial", category:"commercial", description:"10,000 sqft warehouse space in Peenya Industrial Area with loading docks, 3-phase power, and 24/7 security.", price:12000000, pricePerUnit:1200, priceUnit:"sqft", size:10000, sizeUnit:"sqft", status:"draft", owner:"Industrial Props Ltd", ownerContact:"+91 88776 65544", country:"India", state:"Karnataka", city:"Bangalore", area:"Peenya", pincode:"560058", lat:13.0325, lng:77.5177, images:["https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?w=800"], coverImage:0, tags:["commercial","industrial"], nearHighway:true, cornerSite:false, approved:false, notes:[], buyers:[], negotiationNotes:"", views:89, isFavorite:false, createdAt:"2025-03-25T08:00:00Z", updatedAt:"2025-03-25T08:00:00Z" },
+const TAGS = [
+  "investment", "prime-location", "near-highway", "corner-site", "approved",
+  "luxury", "urgent-sale", "gated-community", "near-it-park", "high-roi",
+  "industrial", "commercial",
 ];
 
-const SAMPLE_NOTIFICATIONS = [
-  { id:"notif_1", type:"price_change", message:'Price updated for "3BHK Villa - Whitefield"', propertyId:"prop_003", read:false, createdAt:"2025-03-25T10:00:00Z" },
-  { id:"notif_2", type:"status_change", message:'"5 Acre Agricultural Land" marked as Sold', propertyId:"prop_005", read:false, createdAt:"2025-03-01T10:00:00Z" },
-  { id:"notif_3", type:"new_property", message:'New property: "40x60 Plot - Electronic City"', propertyId:"prop_006", read:true, createdAt:"2025-03-01T08:00:00Z" },
-  { id:"notif_4", type:"reminder", message:'"2 Acre Premium Farm Land" unsold 60+ days', propertyId:"prop_001", read:true, createdAt:"2025-03-15T08:00:00Z" },
+const SALES = [
+  { month: "Oct", sales: 2, value: 12 }, { month: "Nov", sales: 3, value: 18 },
+  { month: "Dec", sales: 1, value: 8 }, { month: "Jan", sales: 4, value: 25 },
+  { month: "Feb", sales: 2, value: 15 }, { month: "Mar", sales: 3, value: 22 },
 ];
 
-const SALES_DATA = [
-  { month:"Oct", sales:2, value:12 }, { month:"Nov", sales:3, value:18 },
-  { month:"Dec", sales:1, value:8 }, { month:"Jan", sales:4, value:25 },
-  { month:"Feb", sales:2, value:15 }, { month:"Mar", sales:3, value:22 },
-];
-
-const TAG_OPTIONS = ["investment","prime-location","near-highway","corner-site","approved","luxury","urgent-sale","gated-community","near-it-park","high-roi","industrial","commercial"];
-
-// ── Glass Components ──
-const GlassCard = ({ children, className = "", onClick, hover = true }) => (
-  <div onClick={onClick} className={`relative bg-white/[0.04] backdrop-blur-2xl border border-white/[0.08] rounded-2xl ${hover ? "transition-all duration-300 hover:bg-white/[0.07] hover:border-white/[0.15] hover:-translate-y-0.5 hover:shadow-[0_20px_60px_-15px_rgba(0,0,0,0.5)]" : ""} ${onClick ? "cursor-pointer" : ""} ${className}`}>
+// ═══════════════════════════════════════════════════════════
+// GLASS UI COMPONENTS
+// ═══════════════════════════════════════════════════════════
+const GC = ({ children, className = "", onClick, hover = true }) => (
+  <div
+    onClick={onClick}
+    className={`relative bg-white/[0.04] backdrop-blur-2xl border border-white/[0.08] rounded-2xl
+      ${hover ? "transition-all duration-300 hover:bg-white/[0.07] hover:border-white/[0.15] hover:-translate-y-0.5 hover:shadow-[0_20px_60px_-15px_rgba(0,0,0,0.5)]" : ""}
+      ${onClick ? "cursor-pointer" : ""} ${className}`}
+  >
     {children}
   </div>
 );
 
-const GlassInput = ({ className = "", ...props }) => (
-  <input {...props} className={`w-full bg-white/[0.06] backdrop-blur-sm border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/10 focus:bg-white/[0.08] transition-all ${className}`} />
+const GI = ({ className = "", ...p }) => (
+  <input
+    {...p}
+    className={`w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5
+      text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none
+      focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/10 transition-all ${className}`}
+  />
 );
 
-const GlassSelect = ({ className = "", children, ...props }) => (
-  <select {...props} className={`w-full bg-white/[0.06] backdrop-blur-sm border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/10 transition-all appearance-none ${className}`} style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`, backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center" }}>
+const GS = ({ className = "", children, ...p }) => (
+  <select
+    {...p}
+    className={`w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5
+      text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 transition-all
+      appearance-none ${className}`}
+    style={{
+      backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
+      backgroundRepeat: "no-repeat",
+      backgroundPosition: "right 12px center",
+    }}
+  >
     {children}
   </select>
 );
 
-const GlassTextarea = ({ className = "", ...props }) => (
-  <textarea {...props} className={`w-full bg-white/[0.06] backdrop-blur-sm border border-white/10 rounded-xl px-4 py-3 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 focus:ring-2 focus:ring-cyan-400/10 focus:bg-white/[0.08] transition-all resize-none ${className}`} />
+const GT = ({ className = "", ...p }) => (
+  <textarea
+    {...p}
+    className={`w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-3
+      text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none
+      focus:border-cyan-400/50 transition-all resize-none ${className}`}
+  />
 );
 
-const StatusBadge = ({ status }) => {
-  const styles = { available: "bg-emerald-400/15 text-emerald-400 border-emerald-400/30", sold: "bg-rose-400/15 text-rose-400 border-rose-400/30", "on-hold": "bg-amber-400/15 text-amber-400 border-amber-400/30", draft: "bg-slate-400/15 text-slate-400 border-slate-400/30" };
-  return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-lg text-[11px] font-semibold uppercase tracking-wider border ${styles[status] || styles.draft}`}>{status}</span>;
+const SB = ({ status }) => {
+  const colors = {
+    available: "bg-emerald-400/15 text-emerald-400 border-emerald-400/30",
+    sold: "bg-rose-400/15 text-rose-400 border-rose-400/30",
+    "on-hold": "bg-amber-400/15 text-amber-400 border-amber-400/30",
+    draft: "bg-slate-400/15 text-slate-400 border-slate-400/30",
+  };
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-lg text-[10px] sm:text-[11px]
+      font-semibold uppercase tracking-wider border ${colors[status] || colors.draft}`}>
+      {status}
+    </span>
+  );
 };
 
-const TypeIcon = ({ type, size = 16 }) => {
-  const icons = { land: TreePine, plot: Layers, house: Home, commercial: Building2 };
-  const Icon = icons[type] || Landmark;
+const TI = ({ type, size = 16 }) => {
+  const m = { land: TreePine, plot: Layers, house: Home, commercial: Building2 };
+  const Icon = m[type] || Landmark;
   return <Icon size={size} />;
 };
 
-// ── Main App ──
-export default function PropertyNexus() {
-  const [properties, setProperties] = useState(SAMPLE_PROPERTIES);
-  const [notifications, setNotifications] = useState(SAMPLE_NOTIFICATIONS);
-  const [activePage, setActivePage] = useState("dashboard");
-  const [selectedProperty, setSelectedProperty] = useState(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [showFilters, setShowFilters] = useState(false);
-  const [editingProperty, setEditingProperty] = useState(null);
-  const [viewMode, setViewMode] = useState("grid");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filters, setFilters] = useState({ type: "", category: "", status: "", minPrice: "", maxPrice: "", area: "", nearHighway: "", cornerSite: "", facing: "", approved: "", favoritesOnly: false });
+const Spin = ({ size = 20 }) => <Loader2 size={size} className="animate-spin text-cyan-400" />;
 
-  const unreadCount = notifications.filter(n => !n.read).length;
+// ═══════════════════════════════════════════════════════════
+// MAIN APPLICATION
+// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// DOCUMENT TAB — upload docs to Cloudinary, store refs in RTDB
+// ═══════════════════════════════════════════════════════════
+const DocTab = ({ property: p, showT }) => {
+  const docInputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
 
-  // Filtered properties
-  const filteredProperties = useMemo(() => {
-    return properties.filter(p => {
-      if (searchQuery && !p.title.toLowerCase().includes(searchQuery.toLowerCase()) && !p.area.toLowerCase().includes(searchQuery.toLowerCase()) && !p.id.toLowerCase().includes(searchQuery.toLowerCase()) && !p.city.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-      if (filters.type && p.type !== filters.type) return false;
-      if (filters.category && p.category !== filters.category) return false;
-      if (filters.status && p.status !== filters.status) return false;
-      if (filters.minPrice && p.price < Number(filters.minPrice)) return false;
-      if (filters.maxPrice && p.price > Number(filters.maxPrice)) return false;
-      if (filters.area && !p.area.toLowerCase().includes(filters.area.toLowerCase())) return false;
-      if (filters.nearHighway === "true" && !p.nearHighway) return false;
-      if (filters.cornerSite === "true" && !p.cornerSite) return false;
-      if (filters.facing && p.facing !== filters.facing) return false;
-      if (filters.approved === "true" && !p.approved) return false;
-      if (filters.favoritesOnly && !p.isFavorite) return false;
-      return true;
-    });
-  }, [properties, searchQuery, filters]);
-
-  // Stats
-  const stats = useMemo(() => {
-    const total = properties.length;
-    const available = properties.filter(p => p.status === "available").length;
-    const sold = properties.filter(p => p.status === "sold").length;
-    const onHold = properties.filter(p => p.status === "on-hold").length;
-    const totalValue = properties.filter(p => p.status !== "sold").reduce((s, p) => s + p.price, 0);
-    const totalSoldValue = properties.filter(p => p.status === "sold").reduce((s, p) => s + (p.finalSellingPrice || p.price), 0);
-    const mostViewed = [...properties].sort((a, b) => b.views - a.views).slice(0, 5);
-    return { total, available, sold, onHold, totalValue, totalSoldValue, mostViewed };
-  }, [properties]);
-
-  const toggleFavorite = (id) => setProperties(ps => ps.map(p => p.id === id ? { ...p, isFavorite: !p.isFavorite } : p));
-
-  const deleteProperty = (id) => {
-    if (confirm("Are you sure you want to delete this property?")) {
-      setProperties(ps => ps.filter(p => p.id !== id));
-      if (selectedProperty?.id === id) setSelectedProperty(null);
+  const handleDocFiles = async (fileList) => {
+    const files = Array.from(fileList);
+    if (!files.length) return;
+    setUploading(true);
+    const existing = p.documents || [];
+    const newDocs = [...existing];
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const result = await uploadToCloudinary(files[i], p.id);
+        newDocs.push({
+          id: "d_" + Math.random().toString(36).substr(2, 9),
+          name: files[i].name,
+          type: files[i].type,
+          url: result.url,
+          publicId: result.publicId,
+          uploadedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        showT("Doc upload failed: " + err.message, "error");
+      }
     }
+    await fbUpdate(`properties/${p.id}`, { documents: newDocs });
+    showT("Document(s) uploaded");
+    setUploading(false);
   };
 
-  const updatePropertyStatus = (id, status) => {
-    setProperties(ps => ps.map(p => p.id === id ? { ...p, status, updatedAt: new Date().toISOString() } : p));
-    const prop = properties.find(p => p.id === id);
-    setNotifications(ns => [{ id: generateId(), type: "status_change", message: `"${prop?.title}" → ${status}`, read: false, createdAt: new Date().toISOString() }, ...ns]);
-  };
+  const docs = p.documents || [];
 
-  const saveProperty = (data) => {
-    if (editingProperty) {
-      setProperties(ps => ps.map(p => p.id === editingProperty.id ? { ...p, ...data, updatedAt: new Date().toISOString() } : p));
-    } else {
-      const newProp = { ...data, id: generateId(), images: ["https://images.unsplash.com/photo-1558618666-fcd25c85f82e?w=800"], coverImage: 0, notes: [], buyers: [], views: 0, isFavorite: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-      setProperties(ps => [newProp, ...ps]);
-      setNotifications(ns => [{ id: generateId(), type: "new_property", message: `New property: "${data.title}"`, read: false, createdAt: new Date().toISOString() }, ...ns]);
-    }
-    setShowAddModal(false);
-    setEditingProperty(null);
-  };
-
-  // ── Sidebar ──
-  const navItems = [
-    { id: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
-    { id: "properties", icon: Building2, label: "Properties" },
-    { id: "favorites", icon: Heart, label: "Favorites" },
-    { id: "deals", icon: IndianRupee, label: "Deals" },
-    { id: "map", icon: Map, label: "Map View" },
-    { id: "documents", icon: FolderOpen, label: "Documents" },
-    { id: "analytics", icon: BarChart3, label: "Analytics" },
-    { id: "users", icon: Users, label: "Users" },
-    { id: "audit", icon: ScrollText, label: "Audit Logs" },
-    { id: "settings", icon: Settings, label: "Settings" },
-  ];
-
-  const Sidebar = () => (
-    <div className={`fixed left-0 top-0 h-screen z-40 transition-all duration-300 ${sidebarCollapsed ? "w-[72px]" : "w-[260px]"} bg-[#0c1121]/90 backdrop-blur-2xl border-r border-white/[0.06] flex flex-col`}>
-      <div className="p-4 flex items-center gap-3 border-b border-white/[0.06] h-16">
-        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-purple-500 flex items-center justify-center flex-shrink-0">
-          <Landmark size={18} className="text-slate-900" />
-        </div>
-        {!sidebarCollapsed && <span className="font-display font-bold text-lg tracking-tight bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">PropertyNexus</span>}
+  return (
+    <GC className="p-4 space-y-3" hover={false}>
+      <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents</h3>
+      <div
+        className="border-2 border-dashed border-white/10 rounded-xl p-6 text-center hover:border-cyan-400/30 transition-colors cursor-pointer"
+        onClick={() => !uploading && docInputRef.current?.click()}
+        onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleDocFiles(e.dataTransfer.files); }}
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      >
+        {uploading ? (
+          <div className="flex items-center justify-center gap-2 text-cyan-400">
+            <Loader2 size={18} className="animate-spin" />
+            <span className="text-xs">Uploading…</span>
+          </div>
+        ) : (
+          <>
+            <Upload size={22} className="mx-auto text-slate-500 mb-2" />
+            <p className="text-xs text-slate-400">Click or drag & drop documents</p>
+            <p className="text-[10px] text-slate-600 mt-1">PDF, DOCX, images — title deeds, sale agreements, tax docs</p>
+          </>
+        )}
+        <input ref={docInputRef} type="file" multiple accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp" className="hidden"
+          onChange={(e) => handleDocFiles(e.target.files)} />
       </div>
-      <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
-        {navItems.map(item => (
-          <button key={item.id} onClick={() => { setActivePage(item.id); setSelectedProperty(null); }} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all ${activePage === item.id ? "bg-cyan-400/10 text-cyan-400 border border-cyan-400/20" : "text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent"}`}>
-            <item.icon size={18} className="flex-shrink-0" />
-            {!sidebarCollapsed && <span className="font-medium">{item.label}</span>}
-          </button>
+      {docs.length === 0 && !uploading && <p className="text-xs text-slate-600 text-center py-2">No documents yet</p>}
+      <div className="space-y-2">
+        {docs.map((doc) => (
+          <div key={doc.id} className="flex items-center gap-3 p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
+            <div className="w-8 h-8 rounded-lg bg-cyan-400/10 flex items-center justify-center flex-shrink-0">
+              <FileText size={14} className="text-cyan-400" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-slate-200 truncate">{doc.name}</p>
+              <p className="text-[10px] text-slate-500">{new Date(doc.uploadedAt).toLocaleDateString()}</p>
+            </div>
+            <a href={doc.url} target="_blank" rel="noopener noreferrer"
+              className="p-1.5 rounded-lg bg-white/[0.06] text-slate-400 hover:text-white transition-all">
+              <Eye size={13} />
+            </a>
+          </div>
         ))}
-      </nav>
-      <div className="p-3 border-t border-white/[0.06]">
-        <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-slate-500 hover:text-slate-300 hover:bg-white/[0.04] transition-all text-sm">
-          {sidebarCollapsed ? <ChevronRight size={16} /> : <><ChevronLeft size={16} /><span>Collapse</span></>}
+      </div>
+    </GC>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+// AUTH SCREEN
+// ═══════════════════════════════════════════════════════════
+const AuthScreen = ({ mode, setMode, form, setForm, onSubmit, error, busy }) => (
+  <div className="min-h-screen bg-[#0a0e1a] flex items-center justify-center p-4">
+    <div className="fixed inset-0 pointer-events-none" style={{
+      background: "radial-gradient(ellipse at 30% 40%, rgba(0,240,255,0.07) 0%, transparent 55%), radial-gradient(ellipse at 70% 60%, rgba(168,85,247,0.05) 0%, transparent 55%)"
+    }} />
+    <div className="w-full max-w-sm relative">
+      <div className="text-center mb-8">
+        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-cyan-400 to-purple-500 flex items-center justify-center mx-auto mb-3">
+          <Landmark size={26} className="text-slate-900" />
+        </div>
+        <h1 className="text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>PropertyNexus</h1>
+        <p className="text-slate-500 text-sm mt-1">{mode === "login" ? "Sign in to your account" : "Create your account"}</p>
+      </div>
+      <div className="bg-white/[0.04] backdrop-blur-2xl border border-white/[0.08] rounded-2xl p-6 space-y-4">
+        {mode === "signup" && (
+          <div>
+            <label className="text-[10px] text-slate-500 uppercase block mb-1.5">Full Name</label>
+            <input type="text" placeholder="Rajesh Kumar" value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all" />
+          </div>
+        )}
+        <div>
+          <label className="text-[10px] text-slate-500 uppercase block mb-1.5">Email</label>
+          <input type="email" placeholder="you@example.com" value={form.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+            className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all" />
+        </div>
+        <div>
+          <label className="text-[10px] text-slate-500 uppercase block mb-1.5">Password</label>
+          <input type="password" placeholder={mode === "signup" ? "Min. 6 characters" : "••••••••"} value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+            onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+            className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all" />
+        </div>
+        {error && (
+          <div className="flex items-center gap-2 px-3 py-2.5 bg-rose-500/10 border border-rose-400/20 rounded-xl">
+            <AlertCircle size={14} className="text-rose-400 flex-shrink-0" />
+            <p className="text-xs text-rose-300">{error}</p>
+          </div>
+        )}
+        <button onClick={onSubmit} disabled={busy}
+          className="w-full py-2.5 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold hover:shadow-[0_8px_30px_-8px_rgba(0,240,255,0.5)] transition-all disabled:opacity-60 flex items-center justify-center gap-2">
+          {busy && <Loader2 size={16} className="animate-spin" />}
+          {mode === "login" ? "Sign In" : "Create Account"}
         </button>
+        <p className="text-center text-xs text-slate-500">
+          {mode === "login" ? "Don't have an account? " : "Already have an account? "}
+          <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setForm({ name: "", email: "", password: "" }); }}
+            className="text-cyan-400 hover:text-cyan-300 font-medium">
+            {mode === "login" ? "Sign up" : "Sign in"}
+          </button>
+        </p>
       </div>
     </div>
-  );
+  </div>
+);
 
-  // ── Top Bar ──
-  const TopBar = () => (
-    <div className="h-16 bg-[#0c1121]/60 backdrop-blur-2xl border-b border-white/[0.06] flex items-center justify-between px-6 sticky top-0 z-30">
-      <div className="flex items-center gap-4 flex-1">
-        <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} className="lg:hidden text-slate-400 hover:text-white"><Menu size={20} /></button>
-        <div className="relative max-w-md flex-1">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-          <GlassInput placeholder="Search properties, areas, IDs..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="pl-10 !py-2" />
+export default function PropertyNexus() {
+  // ─── Auth state ───
+  const [currentUser, setCurrentUser] = useState(null);  // Firebase Auth user object
+  const [authLoading, setAuthLoading] = useState(true);   // waiting for onAuthStateChanged
+  const [authMode, setAuthMode] = useState("login");      // "login" | "signup"
+  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+
+  // ─── App state ───
+  const [props, setProps] = useState([]);
+  const [notifs, setNotifs] = useState([]);
+  const [audits, setAudits] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [fbOk, setFbOk] = useState(false);
+  const [page, setPage] = useState("dashboard");
+  const [selProp, setSelProp] = useState(null);
+  const [sidebar, setSidebar] = useState(false);
+  const [showNotif, setShowNotif] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showFilter, setShowFilter] = useState(false);
+  const [editProp, setEditProp] = useState(null);
+  const [viewMode, setViewMode] = useState("grid");
+  const [search, setSearch] = useState("");
+  const [mobSearch, setMobSearch] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [flt, setFlt] = useState({
+    type: "", category: "", status: "", minPrice: "", maxPrice: "",
+    area: "", nearHighway: "", cornerSite: "", facing: "", favOnly: false,
+  });
+
+  const showT = (m, t = "success") => {
+    setToast({ m, t });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const unread = notifs.filter((n) => !n.read).length;
+
+  // ─── Auth handlers ───
+  const handleAuth = async (e) => {
+    e && e.preventDefault && e.preventDefault();
+    setAuthError("");
+    setAuthBusy(true);
+    try {
+      if (authMode === "login") {
+        await signInWithEmailAndPassword(auth, authForm.email, authForm.password);
+      } else {
+        const cred = await createUserWithEmailAndPassword(auth, authForm.email, authForm.password);
+        if (authForm.name.trim()) {
+          await updateProfile(cred.user, { displayName: authForm.name.trim() });
+        }
+      }
+    } catch (err) {
+      const msgs = {
+        "auth/user-not-found": "No account found with this email.",
+        "auth/wrong-password": "Incorrect password.",
+        "auth/email-already-in-use": "An account with this email already exists.",
+        "auth/weak-password": "Password must be at least 6 characters.",
+        "auth/invalid-email": "Please enter a valid email address.",
+        "auth/invalid-credential": "Incorrect email or password.",
+      };
+      setAuthError(msgs[err.code] || err.message);
+    }
+    setAuthBusy(false);
+  };
+
+  const handleSignOut = async () => {
+    await signOut(auth);
+    setProps([]); setNotifs([]); setAudits([]);
+    setPage("dashboard"); setSelProp(null);
+  };
+
+  // ─── Listen for auth state, then subscribe to RTDB ───
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setAuthLoading(false);
+    });
+    return () => unsubAuth();
+  }, []);
+
+  // ─── Firebase realtime subscriptions (only when logged in) ───
+  useEffect(() => {
+    if (!currentUser) { setLoading(false); return; }
+    setLoading(true);
+    let unsub1, unsub2, unsub3;
+    try {
+      unsub1 = fbSub("properties", (data) => {
+        setProps(data);
+        setLoading(false);
+        setFbOk(true);
+      });
+      unsub2 = fbSub("notifications", setNotifs);
+      unsub3 = fbSub("auditLogs", setAudits);
+    } catch (e) {
+      console.error("Firebase subscription error:", e);
+      setLoading(false);
+    }
+    return () => {
+      if (unsub1) unsub1();
+      if (unsub2) unsub2();
+      if (unsub3) unsub3();
+    };
+  }, [currentUser]);
+
+  // ─── Filtered properties ───
+  const filtered = useMemo(() => {
+    return props.filter((p) => {
+      if (search) {
+        const q = search.toLowerCase();
+        if (
+          !(p.title || "").toLowerCase().includes(q) &&
+          !(p.area || "").toLowerCase().includes(q) &&
+          !(p.id || "").toLowerCase().includes(q) &&
+          !(p.city || "").toLowerCase().includes(q)
+        ) return false;
+      }
+      if (flt.type && p.type !== flt.type) return false;
+      if (flt.category && p.category !== flt.category) return false;
+      if (flt.status && p.status !== flt.status) return false;
+      if (flt.minPrice && p.price < +flt.minPrice) return false;
+      if (flt.maxPrice && p.price > +flt.maxPrice) return false;
+      if (flt.area && !(p.area || "").toLowerCase().includes(flt.area.toLowerCase())) return false;
+      if (flt.nearHighway === "true" && !p.nearHighway) return false;
+      if (flt.cornerSite === "true" && !p.cornerSite) return false;
+      if (flt.facing && p.facing !== flt.facing) return false;
+      if (flt.favOnly && !p.isFavorite) return false;
+      return true;
+    });
+  }, [props, search, flt]);
+
+  // ─── Stats ───
+  const st = useMemo(() => {
+    const t = props.length;
+    const a = props.filter((p) => p.status === "available").length;
+    const s = props.filter((p) => p.status === "sold").length;
+    const h = props.filter((p) => p.status === "on-hold").length;
+    const tv = props.filter((p) => p.status !== "sold").reduce((x, p) => x + (+p.price || 0), 0);
+    const sv = props.filter((p) => p.status === "sold").reduce((x, p) => x + (+(p.finalSellingPrice || p.price) || 0), 0);
+    const mv = [...props].sort((a, b) => (b.views || 0) - (a.views || 0)).slice(0, 5);
+    return { t, a, s, h, tv, sv, mv };
+  }, [props]);
+
+  // ─── CRUD handlers ───
+  const togFav = async (id) => {
+    const p = props.find((x) => x.id === id);
+    if (p) await fbUpdate(`properties/${id}`, { isFavorite: !p.isFavorite });
+  };
+
+  const delProp = async (id) => {
+    const p = props.find((x) => x.id === id);
+    if (!confirm(`Delete "${p?.title}"? This cannot be undone.`)) return;
+    setSaving(true);
+    try {
+      await fbRemove(`properties/${id}`);
+      await addAudit("Deleted", `"${p?.title}"`, currentUser?.displayName || currentUser?.email || "User");
+      await addNotif("status_change", `"${p?.title}" deleted`, id);
+      if (selProp?.id === id) setSelProp(null);
+      showT("Deleted successfully");
+    } catch (e) {
+      showT("Delete failed", "error");
+    }
+    setSaving(false);
+  };
+
+  const updStatus = async (id, s) => {
+    const p = props.find((x) => x.id === id);
+    setSaving(true);
+    try {
+      await fbUpdate(`properties/${id}`, { status: s, updatedAt: new Date().toISOString() });
+      await addNotif("status_change", `"${p?.title}" → ${s}`, id);
+      showT(`Status → ${s}`);
+    } catch (e) {
+      showT("Update failed", "error");
+    }
+    setSaving(false);
+  };
+
+  const saveProp = async (data) => {
+    setSaving(true);
+    try {
+      if (editProp) {
+        await fbUpdate(`properties/${editProp.id}`, { ...data, updatedAt: new Date().toISOString() });
+        await addAudit("Updated", `"${data.title}"`, currentUser?.displayName || currentUser?.email || "User");
+        if (data.price && editProp.price && +data.price !== +editProp.price) {
+          await addNotif("price_change", `Price: ${fmt(editProp.price)} → ${fmt(data.price)}`, editProp.id);
+        }
+        showT("Property updated");
+      } else {
+        const nd = {
+          ...data, images: data.images || [], coverImage: 0, notes: [], buyers: [],
+          views: 0, isFavorite: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          createdBy: currentUser?.uid || "unknown",
+        };
+        await fbPush("properties", nd);
+        await addAudit("Created", `"${data.title}"`, currentUser?.displayName || currentUser?.email || "User");
+        await addNotif("new_property", `New: "${data.title}"`, null);
+        showT("Property added");
+      }
+      setShowAdd(false);
+      setEditProp(null);
+    } catch (e) {
+      showT(e.message, "error");
+    }
+    setSaving(false);
+  };
+
+  const resetFlt = () => setFlt({
+    type: "", category: "", status: "", minPrice: "", maxPrice: "",
+    area: "", nearHighway: "", cornerSite: "", facing: "", favOnly: false,
+  });
+
+  // ─── NAV items ───
+  const navItems = [
+    { id: "dashboard", icon: LayoutDashboard, l: "Dashboard" },
+    { id: "properties", icon: Building2, l: "Properties" },
+    { id: "favorites", icon: Heart, l: "Favorites" },
+    { id: "deals", icon: DollarSign, l: "Deals" },
+    { id: "map", icon: Map, l: "Map View" },
+    { id: "documents", icon: FolderOpen, l: "Documents" },
+    { id: "analytics", icon: BarChart3, l: "Analytics" },
+    { id: "users", icon: Users, l: "Users" },
+    { id: "audit", icon: ScrollText, l: "Audit Logs" },
+    { id: "settings", icon: Settings, l: "Settings" },
+  ];
+
+  // ═══════════════════════════════════════════════════════════
+  // SIDEBAR
+  // ═══════════════════════════════════════════════════════════
+  const SidebarComp = () => (
+    <>
+      {sidebar && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 lg:hidden" onClick={() => setSidebar(false)} />
+      )}
+      <div className={`fixed left-0 top-0 h-screen z-50 w-[260px] bg-[#0c1121]/95 backdrop-blur-2xl
+        border-r border-white/[0.06] flex flex-col transition-transform duration-300
+        ${sidebar ? "translate-x-0" : "-translate-x-full"} lg:translate-x-0`}>
+
+        <div className="p-4 flex items-center justify-between border-b border-white/[0.06] h-16">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-purple-500 flex items-center justify-center">
+              <Landmark size={18} className="text-slate-900" />
+            </div>
+            <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent"
+              style={{ fontFamily: "'Outfit', sans-serif" }}>PropertyNexus</span>
+          </div>
+          <button onClick={() => setSidebar(false)} className="lg:hidden p-1.5 rounded-lg hover:bg-white/10 text-slate-400">
+            <X size={18} />
+          </button>
+        </div>
+
+        <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => { setPage(item.id); setSelProp(null); setSidebar(false); }}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all
+                ${page === item.id
+                  ? "bg-cyan-400/10 text-cyan-400 border border-cyan-400/20"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent"
+                }`}
+            >
+              <item.icon size={18} className="flex-shrink-0" />
+              <span className="font-medium">{item.l}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="p-3 border-t border-white/[0.06]">
+          <div className={`flex items-center gap-2 px-3 py-2 text-xs ${fbOk ? "text-emerald-400" : "text-rose-400"}`}>
+            <div className={`w-2 h-2 rounded-full ${fbOk ? "bg-emerald-400 animate-pulse" : "bg-rose-400"}`} />
+            {fbOk ? "Firebase Connected" : "Disconnected"}
+          </div>
         </div>
       </div>
-      <div className="flex items-center gap-3">
-        <button onClick={() => { setShowAddModal(true); setEditingProperty(null); }} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold hover:shadow-[0_8px_30px_-8px_rgba(0,240,255,0.4)] transition-all hover:-translate-y-0.5">
-          <Plus size={16} /> <span className="hidden sm:inline">Add Property</span>
+    </>
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // TOPBAR
+  // ═══════════════════════════════════════════════════════════
+  const TopBar = () => (
+    <div className="h-14 sm:h-16 bg-[#0c1121]/60 backdrop-blur-2xl border-b border-white/[0.06]
+      flex items-center justify-between px-3 sm:px-6 sticky top-0 z-30">
+      <div className="flex items-center gap-2 sm:gap-4 flex-1">
+        <button onClick={() => setSidebar(true)} className="lg:hidden p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/[0.06]">
+          <Menu size={20} />
         </button>
+        {/* Desktop search */}
+        <div className="relative hidden sm:block max-w-md flex-1">
+          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+          <GI placeholder="Search properties, areas, IDs..." value={search}
+            onChange={(e) => setSearch(e.target.value)} className="pl-10 !py-2" />
+        </div>
+        {/* Mobile search toggle */}
+        <button onClick={() => setMobSearch(!mobSearch)} className="sm:hidden p-2 rounded-xl text-slate-400">
+          <Search size={18} />
+        </button>
+      </div>
+
+      <div className="flex items-center gap-2 sm:gap-3">
+        <button
+          onClick={() => { setShowAdd(true); setEditProp(null); }}
+          className="flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500
+            rounded-xl text-slate-900 text-xs sm:text-sm font-bold
+            hover:shadow-[0_8px_30px_-8px_rgba(0,240,255,0.4)] transition-all"
+        >
+          <Plus size={15} />
+          <span className="hidden sm:inline">Add Property</span>
+        </button>
+
+        {/* Notifications */}
         <div className="relative">
-          <button onClick={() => setShowNotifications(!showNotifications)} className="relative p-2.5 rounded-xl bg-white/[0.04] border border-white/[0.08] text-slate-400 hover:text-white hover:bg-white/[0.08] transition-all">
-            <Bell size={18} />
-            {unreadCount > 0 && <span className="absolute -top-1 -right-1 w-5 h-5 bg-rose-500 rounded-full text-[10px] font-bold text-white flex items-center justify-center">{unreadCount}</span>}
+          <button
+            onClick={() => setShowNotif(!showNotif)}
+            className="relative p-2 sm:p-2.5 rounded-xl bg-white/[0.04] border border-white/[0.08]
+              text-slate-400 hover:text-white transition-all"
+          >
+            <Bell size={17} />
+            {unread > 0 && (
+              <span className="absolute -top-1 -right-1 w-4 h-4 sm:w-5 sm:h-5 bg-rose-500 rounded-full
+                text-[9px] font-bold text-white flex items-center justify-center">{unread}</span>
+            )}
           </button>
-          {showNotifications && (
-            <div className="absolute right-0 top-12 w-80 bg-[#111827]/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50">
-              <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
-                <h3 className="font-display font-semibold text-sm">Notifications</h3>
-                <button onClick={() => setNotifications(ns => ns.map(n => ({ ...n, read: true })))} className="text-xs text-cyan-400 hover:text-cyan-300">Mark all read</button>
+
+          {showNotif && (
+            <div className="absolute right-0 top-11 sm:top-12 w-72 sm:w-80 bg-[#111827]/95
+              backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50">
+              <div className="p-3 border-b border-white/[0.06] flex items-center justify-between">
+                <h3 className="font-semibold text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Notifications</h3>
+                <button
+                  onClick={async () => {
+                    const unreadNotifs = notifs.filter((n) => !n.read);
+                    if (!unreadNotifs.length) return;
+                    // Multi-path atomic update — all reads in one RTDB call
+                    const updates = {};
+                    unreadNotifs.forEach((n) => { updates[`notifications/${n.id}/read`] = true; });
+                    try {
+                      const rootRef = ref(rtdb, "/");
+                      await update(rootRef, updates);
+                    } catch (_) {
+                      for (const n of unreadNotifs) {
+                        await fbUpdate(`notifications/${n.id}`, { read: true });
+                      }
+                    }
+                  }}
+                  className="text-[11px] text-cyan-400 hover:text-cyan-300"
+                >Mark all read</button>
               </div>
-              <div className="max-h-80 overflow-y-auto">
-                {notifications.slice(0, 8).map(n => (
-                  <div key={n.id} className={`px-4 py-3 border-b border-white/[0.04] hover:bg-white/[0.04] transition-all ${!n.read ? "bg-cyan-400/[0.03]" : ""}`}>
+              <div className="max-h-64 overflow-y-auto">
+                {notifs.length === 0 && <p className="text-xs text-slate-600 text-center py-6">No notifications</p>}
+                {notifs.slice(0, 10).map((n) => (
+                  <div key={n.id}
+                    onClick={() => fbUpdate(`notifications/${n.id}`, { read: true })}
+                    className={`px-3 py-2.5 border-b border-white/[0.04] hover:bg-white/[0.04] cursor-pointer
+                      ${!n.read ? "bg-cyan-400/[0.03]" : ""}`}>
                     <div className="flex items-start gap-2">
                       {!n.read && <div className="w-2 h-2 rounded-full bg-cyan-400 mt-1.5 flex-shrink-0" />}
                       <div>
-                        <p className="text-xs text-slate-300 leading-relaxed">{n.message}</p>
-                        <p className="text-[10px] text-slate-500 mt-1">{timeAgo(n.createdAt)}</p>
+                        <p className="text-[11px] text-slate-300 leading-relaxed">{n.message}</p>
+                        <p className="text-[10px] text-slate-500 mt-0.5">{ago(n.createdAt)}</p>
                       </div>
                     </div>
                   </div>
@@ -230,568 +715,913 @@ export default function PropertyNexus() {
             </div>
           )}
         </div>
-        <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-purple-500 to-rose-500 flex items-center justify-center text-white font-bold text-sm">A</div>
+
+        <div className="relative">
+          <button
+            onClick={() => setShowUserMenu((v) => !v)}
+            className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-br from-purple-500 to-rose-500
+              flex items-center justify-center text-white font-bold text-xs sm:text-sm flex-shrink-0 cursor-pointer">
+            {(currentUser?.displayName?.[0] || currentUser?.email?.[0] || "U").toUpperCase()}
+          </button>
+          {showUserMenu && (
+            <>
+              {/* Click-outside overlay */}
+              <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
+              {/* Dropdown */}
+              <div className="absolute right-0 top-11 w-52 bg-[#111827]/98 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl z-50 p-1">
+                <div className="px-3 py-2.5 border-b border-white/[0.06]">
+                  <p className="text-xs font-medium text-white truncate">{currentUser?.displayName || "User"}</p>
+                  <p className="text-[10px] text-slate-500 truncate">{currentUser?.email}</p>
+                </div>
+                <button
+                  onClick={() => { setShowUserMenu(false); handleSignOut(); }}
+                  className="w-full text-left px-3 py-2 text-xs text-rose-400 hover:bg-rose-400/10 rounded-lg mt-1 flex items-center gap-2">
+                  <X size={13} /> Sign out
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
 
-  // ── Dashboard ──
-  const Dashboard = () => (
-    <div className="space-y-6 animate-[fadeIn_0.3s_ease-out]">
-      <div>
-        <h1 className="font-display text-2xl font-bold text-white">Dashboard</h1>
-        <p className="text-slate-500 text-sm mt-1">Overview of your property portfolio</p>
+  // ─── Mobile Search ───
+  const MobSrch = () =>
+    mobSearch ? (
+      <div className="sm:hidden px-3 py-2 bg-[#0c1121]/60 backdrop-blur-xl border-b border-white/[0.06]">
+        <div className="relative">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+          <GI placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)}
+            className="pl-9 !py-2" autoFocus />
+          {search && (
+            <button onClick={() => { setSearch(""); setMobSearch(false); }}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500"><X size={14} /></button>
+          )}
+        </div>
       </div>
-      {/* Stats Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    ) : null;
+
+  // ═══════════════════════════════════════════════════════════
+  // DASHBOARD
+  // ═══════════════════════════════════════════════════════════
+  const Dashboard = () => (
+    <div className="space-y-4 sm:space-y-6 animate-[fadeIn_0.3s]">
+      <div>
+        <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Dashboard</h1>
+        <p className="text-slate-500 text-xs sm:text-sm mt-1">Property portfolio overview</p>
+      </div>
+
+      {/* Stats Grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
         {[
-          { label: "Total Properties", value: stats.total, icon: Building2, color: "cyan", sub: `${stats.available} available` },
-          { label: "Available", value: stats.available, icon: CheckCircle, color: "emerald", sub: formatCurrency(stats.totalValue) },
-          { label: "Sold", value: stats.sold, icon: TrendingUp, color: "rose", sub: formatCurrency(stats.totalSoldValue) },
-          { label: "On Hold", value: stats.onHold, icon: Clock, color: "amber", sub: `${properties.filter(p => p.status === "draft").length} drafts` },
+          { l: "Total", v: st.t, icon: Building2, c: "cyan", sub: `${st.a} available` },
+          { l: "Available", v: st.a, icon: CheckCircle, c: "emerald", sub: fmt(st.tv) },
+          { l: "Sold", v: st.s, icon: TrendingUp, c: "rose", sub: fmt(st.sv) },
+          { l: "On Hold", v: st.h, icon: Clock, c: "amber", sub: `${props.filter((p) => p.status === "draft").length} drafts` },
         ].map((s, i) => (
-          <GlassCard key={i} className="p-5" hover={false}>
+          <GC key={i} className="p-3 sm:p-5" hover={false}>
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-slate-500 text-xs font-medium uppercase tracking-wider">{s.label}</p>
-                <p className="text-3xl font-display font-bold text-white mt-2">{s.value}</p>
-                <p className="text-xs text-slate-500 mt-1">{s.sub}</p>
+                <p className="text-slate-500 text-[10px] sm:text-xs font-medium uppercase tracking-wider">{s.l}</p>
+                <p className="text-2xl sm:text-3xl font-bold text-white mt-1 sm:mt-2" style={{ fontFamily: "'Outfit', sans-serif" }}>{s.v}</p>
+                <p className="text-[10px] sm:text-xs text-slate-500 mt-0.5 truncate">{s.sub}</p>
               </div>
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${s.color === "cyan" ? "bg-cyan-400/10 text-cyan-400" : s.color === "emerald" ? "bg-emerald-400/10 text-emerald-400" : s.color === "rose" ? "bg-rose-400/10 text-rose-400" : "bg-amber-400/10 text-amber-400"}`}>
-                <s.icon size={20} />
+              <div className={`w-8 h-8 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center flex-shrink-0
+                ${s.c === "cyan" ? "bg-cyan-400/10 text-cyan-400" : s.c === "emerald" ? "bg-emerald-400/10 text-emerald-400"
+                : s.c === "rose" ? "bg-rose-400/10 text-rose-400" : "bg-amber-400/10 text-amber-400"}`}>
+                <s.icon size={18} />
               </div>
             </div>
-          </GlassCard>
+          </GC>
         ))}
       </div>
-      {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <GlassCard className="p-5 lg:col-span-2" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white mb-4">Sales Performance</h3>
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={SALES_DATA}>
+
+      {/* Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4">
+        <GC className="p-4 sm:p-5 lg:col-span-2" hover={false}>
+          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Sales Trend</h3>
+          <ResponsiveContainer width="100%" height={180}>
+            <AreaChart data={SALES}>
               <defs>
-                <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
+                <linearGradient id="cv" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#00f0ff" stopOpacity={0.3} />
                   <stop offset="95%" stopColor="#00f0ff" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="month" tick={{ fill: "#64748b", fontSize: 12 }} axisLine={false} />
-              <YAxis tick={{ fill: "#64748b", fontSize: 12 }} axisLine={false} />
-              <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 12, color: "#e2e8f0" }} />
-              <Area type="monotone" dataKey="value" stroke="#00f0ff" strokeWidth={2} fillOpacity={1} fill="url(#colorValue)" />
-              <Area type="monotone" dataKey="sales" stroke="#a855f7" strokeWidth={2} fillOpacity={0.1} fill="#a855f7" />
+              <XAxis dataKey="month" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} />
+              <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} width={30} />
+              <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} />
+              <Area type="monotone" dataKey="value" stroke="#00f0ff" strokeWidth={2} fill="url(#cv)" />
             </AreaChart>
           </ResponsiveContainer>
-        </GlassCard>
-        <GlassCard className="p-5" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white mb-4">By Type</h3>
-          <ResponsiveContainer width="100%" height={220}>
+        </GC>
+
+        <GC className="p-4 sm:p-5" hover={false}>
+          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>By Type</h3>
+          <ResponsiveContainer width="100%" height={180}>
             <PieChart>
-              <Pie data={[
-                { name: "Land", value: properties.filter(p => p.type === "land").length },
-                { name: "Plot", value: properties.filter(p => p.type === "plot").length },
-                { name: "House", value: properties.filter(p => p.type === "house").length },
-                { name: "Commercial", value: properties.filter(p => p.type === "commercial").length },
-              ]} cx="50%" cy="50%" innerRadius={55} outerRadius={80} paddingAngle={4} dataKey="value">
+              <Pie
+                data={[
+                  { name: "Land", value: props.filter((p) => p.type === "land").length || 1 },
+                  { name: "Plot", value: props.filter((p) => p.type === "plot").length || 1 },
+                  { name: "House", value: props.filter((p) => p.type === "house").length || 1 },
+                  { name: "Comm", value: props.filter((p) => p.type === "commercial").length || 1 },
+                ]}
+                cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={4} dataKey="value"
+              >
                 {["#00f0ff", "#a855f7", "#34d399", "#fbbf24"].map((c, i) => <Cell key={i} fill={c} />)}
               </Pie>
-              <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 12, color: "#e2e8f0" }} />
+              <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} />
             </PieChart>
           </ResponsiveContainer>
-          <div className="flex flex-wrap gap-3 mt-2 justify-center">
-            {[{ l: "Land", c: "#00f0ff" }, { l: "Plot", c: "#a855f7" }, { l: "House", c: "#34d399" }, { l: "Comm.", c: "#fbbf24" }].map(i => (
-              <div key={i.l} className="flex items-center gap-1.5 text-[11px] text-slate-400"><div className="w-2 h-2 rounded-full" style={{ background: i.c }} />{i.l}</div>
+          <div className="flex flex-wrap gap-2 mt-1 justify-center">
+            {[{ l: "Land", c: "#00f0ff" }, { l: "Plot", c: "#a855f7" }, { l: "House", c: "#34d399" }, { l: "Comm", c: "#fbbf24" }].map((i) => (
+              <div key={i.l} className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                <div className="w-2 h-2 rounded-full" style={{ background: i.c }} />{i.l}
+              </div>
             ))}
           </div>
-        </GlassCard>
+        </GC>
       </div>
-      {/* Most Viewed + Recent Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <GlassCard className="p-5" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white mb-4">Most Viewed</h3>
-          <div className="space-y-3">
-            {stats.mostViewed.map((p, i) => (
-              <div key={p.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/[0.04] transition-all cursor-pointer" onClick={() => { setSelectedProperty(p); setActivePage("properties"); }}>
-                <span className="text-xs font-mono text-slate-600 w-5">#{i + 1}</span>
-                <div className="w-10 h-10 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${p.images[0]})` }} />
+
+      {/* Most Viewed + Activity */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4">
+        <GC className="p-4 sm:p-5" hover={false}>
+          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Most Viewed</h3>
+          <div className="space-y-2">
+            {st.mv.length === 0 && <p className="text-xs text-slate-600 text-center py-4">No properties yet</p>}
+            {st.mv.map((p, i) => (
+              <div key={p.id} className="flex items-center gap-2 sm:gap-3 p-2 rounded-xl hover:bg-white/[0.04] cursor-pointer"
+                onClick={() => { setSelProp(p); setPage("properties"); }}>
+                <span className="text-[10px] font-mono text-slate-600 w-4">#{i + 1}</span>
+                {p.images?.[0]
+                  ? <div className="w-9 h-9 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${p.images[0]})` }} />
+                  : <div className="w-9 h-9 rounded-lg bg-white/[0.06] flex items-center justify-center flex-shrink-0"><Building2 size={14} className="text-slate-600" /></div>
+                }
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-200 font-medium truncate">{p.title}</p>
-                  <p className="text-[11px] text-slate-500">{p.area} · {formatCurrency(p.price)}</p>
+                  <p className="text-xs sm:text-sm text-slate-200 font-medium truncate">{p.title}</p>
+                  <p className="text-[10px] text-slate-500">{p.area} · {fmt(p.price)}</p>
                 </div>
-                <div className="flex items-center gap-1 text-xs text-slate-500"><Eye size={12} />{p.views}</div>
+                <div className="flex items-center gap-1 text-[10px] text-slate-500"><Eye size={11} />{p.views || 0}</div>
               </div>
             ))}
           </div>
-        </GlassCard>
-        <GlassCard className="p-5" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white mb-4">Recent Activity</h3>
-          <div className="space-y-3">
-            {notifications.slice(0, 5).map(n => (
-              <div key={n.id} className="flex items-start gap-3 p-2">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${n.type === "price_change" ? "bg-amber-400/10 text-amber-400" : n.type === "status_change" ? "bg-emerald-400/10 text-emerald-400" : n.type === "new_property" ? "bg-cyan-400/10 text-cyan-400" : "bg-purple-400/10 text-purple-400"}`}>
-                  {n.type === "price_change" ? <TrendingUp size={14} /> : n.type === "status_change" ? <CheckCircle size={14} /> : n.type === "new_property" ? <Plus size={14} /> : <Bell size={14} />}
+        </GC>
+
+        <GC className="p-4 sm:p-5" hover={false}>
+          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Recent Activity</h3>
+          <div className="space-y-2">
+            {notifs.length === 0 && <p className="text-xs text-slate-600 text-center py-4">No activity yet</p>}
+            {notifs.slice(0, 5).map((n) => (
+              <div key={n.id} className="flex items-start gap-2 p-1.5">
+                <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0
+                  ${n.type === "price_change" ? "bg-amber-400/10 text-amber-400"
+                  : n.type === "status_change" ? "bg-emerald-400/10 text-emerald-400"
+                  : "bg-cyan-400/10 text-cyan-400"}`}>
+                  {n.type === "price_change" ? <TrendingUp size={13} /> : n.type === "status_change" ? <CheckCircle size={13} /> : <Plus size={13} />}
                 </div>
-                <div>
-                  <p className="text-xs text-slate-300 leading-relaxed">{n.message}</p>
-                  <p className="text-[10px] text-slate-600 mt-0.5">{timeAgo(n.createdAt)}</p>
+                <div className="min-w-0">
+                  <p className="text-[11px] text-slate-300 leading-relaxed truncate">{n.message}</p>
+                  <p className="text-[10px] text-slate-600">{ago(n.createdAt)}</p>
                 </div>
               </div>
             ))}
           </div>
-        </GlassCard>
+        </GC>
       </div>
     </div>
   );
 
-  // ── Property Card ──
-  const PropertyCard = ({ property: p }) => (
-    <GlassCard className="overflow-hidden group" onClick={() => setSelectedProperty(p)}>
-      <div className="relative h-44 bg-cover bg-center" style={{ backgroundImage: `url(${p.images[p.coverImage || 0]})` }}>
+  // ═══════════════════════════════════════════════════════════
+  // PROPERTY CARD
+  // ═══════════════════════════════════════════════════════════
+  const PCard = ({ property: p }) => (
+    <GC className="overflow-hidden group" onClick={() => setSelProp(p)}>
+      <div className="relative h-36 sm:h-44 bg-cover bg-center bg-slate-800"
+        style={p.images?.[p.coverImage || 0] ? { backgroundImage: `url(${p.images[p.coverImage || 0]})` } : {}}>
         <div className="absolute inset-0 bg-gradient-to-t from-[#0a0e1a] via-transparent to-transparent" />
-        <div className="absolute top-3 left-3 flex gap-2">
-          <StatusBadge status={p.status} />
-          {p.cornerSite && <span className="px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-purple-400/20 text-purple-300 border border-purple-400/30">CORNER</span>}
+        {!p.images?.[0] && <div className="absolute inset-0 flex items-center justify-center"><Building2 size={32} className="text-slate-700" /></div>}
+        <div className="absolute top-2 sm:top-3 left-2 sm:left-3 flex gap-1.5">
+          <SB status={p.status} />
+          {p.cornerSite && <span className="px-1.5 py-0.5 rounded-md text-[9px] font-semibold bg-purple-400/20 text-purple-300 border border-purple-400/30">CORNER</span>}
         </div>
-        <div className="absolute top-3 right-3 flex gap-1.5">
-          <button onClick={e => { e.stopPropagation(); toggleFavorite(p.id); }} className={`w-8 h-8 rounded-lg backdrop-blur-sm flex items-center justify-center transition-all ${p.isFavorite ? "bg-rose-500/30 text-rose-400" : "bg-black/30 text-white/60 hover:text-white"}`}>
-            <Heart size={14} fill={p.isFavorite ? "currentColor" : "none"} />
-          </button>
-        </div>
-        <div className="absolute bottom-3 left-3 right-3">
-          <p className="font-display font-bold text-white text-base leading-tight drop-shadow-lg">{p.title}</p>
-          <div className="flex items-center gap-1 mt-1 text-slate-300 text-xs"><MapPin size={11} />{p.area}, {p.city}</div>
+        <button onClick={(e) => { e.stopPropagation(); togFav(p.id); }}
+          className={`absolute top-2 sm:top-3 right-2 sm:right-3 w-7 h-7 sm:w-8 sm:h-8 rounded-lg backdrop-blur-sm
+            flex items-center justify-center transition-all
+            ${p.isFavorite ? "bg-rose-500/30 text-rose-400" : "bg-black/30 text-white/60 hover:text-white"}`}>
+          <Heart size={13} fill={p.isFavorite ? "currentColor" : "none"} />
+        </button>
+        <div className="absolute bottom-2 sm:bottom-3 left-2 sm:left-3 right-10">
+          <p className="font-bold text-white text-sm sm:text-base leading-tight drop-shadow-lg line-clamp-2"
+            style={{ fontFamily: "'Outfit', sans-serif" }}>{p.title}</p>
+          <div className="flex items-center gap-1 mt-0.5 text-slate-300 text-[11px]"><MapPin size={10} />{p.area}, {p.city}</div>
         </div>
       </div>
-      <div className="p-4">
+      <div className="p-3 sm:p-4">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-lg font-display font-bold text-cyan-400">{formatCurrency(p.price)}</p>
-            {p.previousPrice && <p className="text-[11px] text-slate-500 line-through">{formatCurrency(p.previousPrice)}</p>}
+            <p className="text-base sm:text-lg font-bold text-cyan-400" style={{ fontFamily: "'Outfit', sans-serif" }}>{fmt(p.price)}</p>
+            {p.previousPrice && <p className="text-[10px] text-slate-500 line-through">{fmt(p.previousPrice)}</p>}
           </div>
-          <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.04] text-xs text-slate-400">
-            <TypeIcon type={p.type} size={12} />
-            <span className="capitalize">{p.type}</span>
+          <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/[0.04] text-[11px] text-slate-400">
+            <TI type={p.type} size={11} />
+            <span className="capitalize hidden sm:inline">{p.type}</span>
           </div>
         </div>
-        <div className="flex items-center gap-4 mt-3 text-xs text-slate-500">
+        <div className="flex items-center gap-2 sm:gap-4 mt-2 text-[10px] sm:text-xs text-slate-500">
           <span>{p.size} {p.sizeUnit}</span>
           <span>₹{p.pricePerUnit}/{p.priceUnit}</span>
-          {p.facing && <span className="flex items-center gap-1"><Compass size={11} />{p.facing}</span>}
+          {p.facing && <span className="hidden sm:flex items-center gap-1"><Compass size={10} />{p.facing}</span>}
         </div>
-        <div className="flex gap-1.5 mt-3 flex-wrap">
-          {p.tags.slice(0, 3).map(t => <span key={t} className="px-2 py-0.5 rounded-md text-[10px] font-medium bg-white/[0.06] text-slate-400 border border-white/[0.06]">{t}</span>)}
+        <div className="flex gap-1 mt-2 flex-wrap">
+          {(p.tags || []).slice(0, 2).map((t) => (
+            <span key={t} className="px-1.5 py-0.5 rounded-md text-[9px] font-medium bg-white/[0.06] text-slate-400 border border-white/[0.06]">{t}</span>
+          ))}
         </div>
-        <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/[0.06]">
-          <div className="flex items-center gap-1 text-[11px] text-slate-500"><Eye size={11} />{p.views} views</div>
-          <div className="flex gap-1">
-            <button onClick={e => { e.stopPropagation(); setEditingProperty(p); setShowAddModal(true); }} className="p-1.5 rounded-lg hover:bg-white/[0.08] text-slate-500 hover:text-white transition-all"><Edit size={13} /></button>
-            <button onClick={e => { e.stopPropagation(); deleteProperty(p.id); }} className="p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-500 hover:text-rose-400 transition-all"><Trash2 size={13} /></button>
+        <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/[0.06]">
+          <div className="flex items-center gap-1 text-[10px] text-slate-500"><Eye size={10} />{p.views || 0}</div>
+          <div className="flex gap-0.5">
+            <button onClick={(e) => { e.stopPropagation(); setEditProp(p); setShowAdd(true); }}
+              className="p-1 sm:p-1.5 rounded-lg hover:bg-white/[0.08] text-slate-500 hover:text-white transition-all"><Edit size={12} /></button>
+            <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
+              className="p-1 sm:p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-500 hover:text-rose-400 transition-all"><Trash2 size={12} /></button>
           </div>
         </div>
       </div>
-    </GlassCard>
+    </GC>
   );
 
-  // ── Property List Item ──
-  const PropertyListItem = ({ property: p }) => (
-    <GlassCard className="p-4 flex items-center gap-4 group" onClick={() => setSelectedProperty(p)}>
-      <div className="w-20 h-16 rounded-xl bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${p.images[0]})` }} />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <p className="font-display font-semibold text-white text-sm truncate">{p.title}</p>
-          <StatusBadge status={p.status} />
-        </div>
-        <div className="flex items-center gap-3 mt-1 text-xs text-slate-500">
-          <span className="flex items-center gap-1"><MapPin size={11} />{p.area}</span>
-          <span>{p.size} {p.sizeUnit}</span>
-          <span className="capitalize flex items-center gap-1"><TypeIcon type={p.type} size={11} />{p.type}</span>
-        </div>
-      </div>
-      <div className="text-right">
-        <p className="font-display font-bold text-cyan-400">{formatCurrency(p.price)}</p>
-        <p className="text-[11px] text-slate-500 mt-0.5">{p.id}</p>
-      </div>
-      <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
-        <button onClick={e => { e.stopPropagation(); toggleFavorite(p.id); }} className={`p-1.5 rounded-lg ${p.isFavorite ? "text-rose-400" : "text-slate-500 hover:text-white"}`}><Heart size={14} fill={p.isFavorite ? "currentColor" : "none"} /></button>
-        <button onClick={e => { e.stopPropagation(); setEditingProperty(p); setShowAddModal(true); }} className="p-1.5 rounded-lg text-slate-500 hover:text-white"><Edit size={14} /></button>
-        <button onClick={e => { e.stopPropagation(); deleteProperty(p.id); }} className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400"><Trash2 size={14} /></button>
-      </div>
-    </GlassCard>
-  );
+  // ═══════════════════════════════════════════════════════════
+  // PROPERTY DETAIL
+  // ═══════════════════════════════════════════════════════════
+  const PDetail = ({ property: p }) => {
+    const [tab, setTab] = useState("overview");
+    const [aImg, setAImg] = useState(0);
+    const [nNote, setNNote] = useState("");
+    const [nBuyer, setNBuyer] = useState({ name: "", contact: "", notes: "" });
+    const [sv, setSv] = useState(false);
+    const lp = props.find((x) => x.id === p.id) || p;
 
-  // ── Property Detail ──
-  const PropertyDetail = ({ property: p }) => {
-    const [activeTab, setActiveTab] = useState("overview");
-    const [activeImg, setActiveImg] = useState(0);
-    const [newNote, setNewNote] = useState("");
-    const [newBuyer, setNewBuyer] = useState({ name: "", contact: "", notes: "" });
-
-    const addNote = () => {
-      if (!newNote.trim()) return;
-      const updated = { ...p, notes: [...p.notes, { id: generateId(), text: newNote, createdAt: new Date().toISOString(), author: "Admin" }] };
-      setProperties(ps => ps.map(x => x.id === p.id ? updated : x));
-      setSelectedProperty(updated);
-      setNewNote("");
+    const addNote = async () => {
+      if (!nNote.trim()) return;
+      setSv(true);
+      try {
+        await fbUpdate(`properties/${p.id}`, {
+          notes: [...(lp.notes || []), { id: gid(), text: nNote, createdAt: new Date().toISOString(), author: "Admin" }],
+        });
+        setNNote("");
+        showT("Note added");
+      } catch (e) { showT("Error", "error"); }
+      setSv(false);
     };
 
-    const addBuyer = () => {
-      if (!newBuyer.name.trim()) return;
-      const updated = { ...p, buyers: [...p.buyers, { id: generateId(), ...newBuyer, addedAt: new Date().toISOString() }] };
-      setProperties(ps => ps.map(x => x.id === p.id ? updated : x));
-      setSelectedProperty(updated);
-      setNewBuyer({ name: "", contact: "", notes: "" });
+    const addBuy = async () => {
+      if (!nBuyer.name.trim()) return;
+      setSv(true);
+      try {
+        await fbUpdate(`properties/${p.id}`, {
+          buyers: [...(lp.buyers || []), { id: gid(), ...nBuyer, addedAt: new Date().toISOString() }],
+        });
+        setNBuyer({ name: "", contact: "", notes: "" });
+        showT("Buyer added");
+      } catch (e) { showT("Error", "error"); }
+      setSv(false);
     };
 
     return (
-      <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-        <button onClick={() => setSelectedProperty(null)} className="flex items-center gap-2 text-sm text-slate-400 hover:text-white transition-all"><ChevronLeft size={16} /> Back to properties</button>
+      <div className="space-y-3 sm:space-y-4 animate-[fadeIn_0.3s]">
+        <button onClick={() => setSelProp(null)} className="flex items-center gap-1.5 text-xs sm:text-sm text-slate-400 hover:text-white">
+          <ChevronLeft size={16} /> Back
+        </button>
 
-        {/* Image Gallery */}
-        <GlassCard className="overflow-hidden" hover={false}>
-          <div className="relative h-64 sm:h-80 bg-cover bg-center" style={{ backgroundImage: `url(${p.images[activeImg]})` }}>
+        {/* Hero Image */}
+        <GC className="overflow-hidden" hover={false}>
+          <div className="relative h-48 sm:h-64 md:h-80 bg-cover bg-center bg-slate-800"
+            style={lp.images?.[aImg] ? { backgroundImage: `url(${lp.images[aImg]})` } : {}}>
             <div className="absolute inset-0 bg-gradient-to-t from-[#0a0e1a]/80 to-transparent" />
-            <div className="absolute top-4 left-4 flex gap-2"><StatusBadge status={p.status} /></div>
-            <button onClick={() => toggleFavorite(p.id)} className={`absolute top-4 right-4 w-10 h-10 rounded-xl backdrop-blur-sm flex items-center justify-center ${p.isFavorite ? "bg-rose-500/30 text-rose-400" : "bg-black/40 text-white/70 hover:text-white"}`}>
-              <Heart size={18} fill={p.isFavorite ? "currentColor" : "none"} />
+            {!lp.images?.[0] && <div className="absolute inset-0 flex items-center justify-center"><Building2 size={48} className="text-slate-700" /></div>}
+            <div className="absolute top-3 left-3"><SB status={lp.status} /></div>
+            <button onClick={() => togFav(p.id)}
+              className={`absolute top-3 right-3 w-9 h-9 rounded-xl backdrop-blur-sm flex items-center justify-center
+                ${lp.isFavorite ? "bg-rose-500/30 text-rose-400" : "bg-black/40 text-white/70"}`}>
+              <Heart size={16} fill={lp.isFavorite ? "currentColor" : "none"} />
             </button>
-            <div className="absolute bottom-4 left-4 right-4">
-              <h1 className="font-display text-2xl font-bold text-white">{p.title}</h1>
-              <div className="flex items-center gap-2 mt-1 text-slate-300 text-sm"><MapPin size={14} />{p.area}, {p.city}, {p.state}</div>
+            <div className="absolute bottom-3 left-3 right-3">
+              <h1 className="text-lg sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>{lp.title}</h1>
+              <div className="flex items-center gap-1.5 mt-0.5 text-slate-300 text-xs"><MapPin size={13} />{lp.area}, {lp.city}, {lp.state}</div>
             </div>
           </div>
-          {p.images.length > 1 && (
-            <div className="flex gap-2 p-3">
-              {p.images.map((img, i) => (
-                <button key={i} onClick={() => setActiveImg(i)} className={`w-16 h-12 rounded-lg bg-cover bg-center border-2 transition-all ${i === activeImg ? "border-cyan-400" : "border-transparent opacity-60 hover:opacity-100"}`} style={{ backgroundImage: `url(${img})` }} />
+          {lp.images?.length > 1 && (
+            <div className="flex gap-1.5 p-2 overflow-x-auto">
+              {lp.images.map((img, i) => (
+                <button key={i} onClick={() => setAImg(i)}
+                  className={`w-12 h-9 sm:w-16 sm:h-12 rounded-lg bg-cover bg-center border-2 flex-shrink-0
+                    ${i === aImg ? "border-cyan-400" : "border-transparent opacity-60 hover:opacity-100"}`}
+                  style={{ backgroundImage: `url(${img})` }} />
               ))}
             </div>
           )}
-        </GlassCard>
+        </GC>
 
-        {/* Quick Info Bar */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* Quick Info */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {[
-            { label: "Price", value: formatCurrency(p.price), icon: IndianRupee, color: "text-cyan-400" },
-            { label: "Size", value: `${p.size} ${p.sizeUnit}`, icon: Maximize2, color: "text-purple-400" },
-            { label: "Type", value: p.type, icon: Building2, color: "text-emerald-400" },
-            { label: "ID", value: p.id, icon: Tag, color: "text-amber-400" },
-          ].map((item, i) => (
-            <GlassCard key={i} className="p-3 flex items-center gap-3" hover={false}>
-              <div className={`w-9 h-9 rounded-lg bg-white/[0.06] flex items-center justify-center ${item.color}`}><item.icon size={16} /></div>
-              <div>
-                <p className="text-[10px] text-slate-500 uppercase tracking-wider">{item.label}</p>
-                <p className={`text-sm font-semibold capitalize ${item.color}`}>{item.value}</p>
+            { l: "Price", v: fmt(lp.price), icon: DollarSign, c: "text-cyan-400" },
+            { l: "Size", v: `${lp.size} ${lp.sizeUnit}`, icon: Maximize2, c: "text-purple-400" },
+            { l: "Type", v: lp.type, icon: Building2, c: "text-emerald-400" },
+            { l: "ID", v: (lp.id || "").substring(0, 12), icon: Tag, c: "text-amber-400" },
+          ].map((x, i) => (
+            <GC key={i} className="p-2.5 flex items-center gap-2" hover={false}>
+              <div className={`w-7 h-7 rounded-lg bg-white/[0.06] flex items-center justify-center flex-shrink-0 ${x.c}`}><x.icon size={14} /></div>
+              <div className="min-w-0">
+                <p className="text-[9px] text-slate-500 uppercase">{x.l}</p>
+                <p className={`text-xs font-semibold capitalize truncate ${x.c}`}>{x.v}</p>
               </div>
-            </GlassCard>
+            </GC>
           ))}
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-1 p-1 bg-white/[0.03] rounded-xl border border-white/[0.06]">
-          {["overview", "notes", "buyers", "documents"].map(tab => (
-            <button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 py-2 rounded-lg text-xs font-medium capitalize transition-all ${activeTab === tab ? "bg-white/[0.08] text-white border border-white/[0.1]" : "text-slate-500 hover:text-slate-300"}`}>{tab}</button>
+        <div className="flex gap-0.5 p-1 bg-white/[0.03] rounded-xl border border-white/[0.06] overflow-x-auto">
+          {["overview", "notes", "buyers", "documents"].map((t) => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`flex-1 py-2 rounded-lg text-[11px] font-medium capitalize px-2
+                ${tab === t ? "bg-white/[0.08] text-white border border-white/[0.1]" : "text-slate-500 hover:text-slate-300"}`}>
+              {t}
+            </button>
           ))}
         </div>
 
-        {activeTab === "overview" && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <GlassCard className="p-5 space-y-4" hover={false}>
-              <h3 className="font-display font-semibold text-white text-sm">Description</h3>
-              <p className="text-sm text-slate-400 leading-relaxed">{p.description}</p>
-              <div className="space-y-3 pt-2">
-                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Details</h4>
+        {/* Tab: Overview */}
+        {tab === "overview" && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <GC className="p-4 space-y-3" hover={false}>
+              <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Description</h3>
+              <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">{lp.description || "No description"}</p>
+              <div className="space-y-2 pt-2">
+                <h4 className="text-[10px] font-semibold text-slate-500 uppercase">Details</h4>
                 {[
-                  { l: "Price per unit", v: `₹${p.pricePerUnit}/${p.priceUnit}` },
-                  { l: "Category", v: p.category },
-                  { l: "Facing", v: p.facing || "N/A" },
-                  { l: "Near Highway", v: p.nearHighway ? "Yes" : "No" },
-                  { l: "Corner Site", v: p.cornerSite ? "Yes" : "No" },
-                  { l: "Approved", v: p.approved ? "Yes" : "No" },
-                ].map(d => (
-                  <div key={d.l} className="flex items-center justify-between text-sm">
+                  { l: "Price/unit", v: `₹${lp.pricePerUnit}/${lp.priceUnit}` },
+                  { l: "Category", v: lp.category }, { l: "Facing", v: lp.facing || "N/A" },
+                  { l: "Highway", v: lp.nearHighway ? "Yes" : "No" },
+                  { l: "Corner", v: lp.cornerSite ? "Yes" : "No" },
+                  { l: "Approved", v: lp.approved ? "Yes" : "No" },
+                ].map((d) => (
+                  <div key={d.l} className="flex justify-between text-xs">
                     <span className="text-slate-500">{d.l}</span>
                     <span className="text-slate-200 font-medium capitalize">{d.v}</span>
                   </div>
                 ))}
               </div>
               <div className="flex flex-wrap gap-1.5 pt-2">
-                {p.tags.map(t => <span key={t} className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-cyan-400/10 text-cyan-400 border border-cyan-400/20">{t}</span>)}
+                {(lp.tags || []).map((t) => (
+                  <span key={t} className="px-2 py-0.5 rounded-lg text-[10px] font-medium bg-cyan-400/10 text-cyan-400 border border-cyan-400/20">{t}</span>
+                ))}
               </div>
-            </GlassCard>
-            <div className="space-y-4">
-              <GlassCard className="p-5" hover={false}>
-                <h3 className="font-display font-semibold text-white text-sm mb-3">Owner Details</h3>
+            </GC>
+
+            <div className="space-y-3">
+              <GC className="p-4" hover={false}>
+                <h3 className="font-semibold text-white text-sm mb-2" style={{ fontFamily: "'Outfit', sans-serif" }}>Owner</h3>
                 <div className="space-y-2">
-                  <div className="flex items-center gap-3"><User size={14} className="text-slate-500" /><span className="text-sm text-slate-300">{p.owner}</span></div>
-                  <div className="flex items-center gap-3"><Phone size={14} className="text-slate-500" /><span className="text-sm text-slate-300">{p.ownerContact}</span></div>
-                  <div className="flex items-center gap-3"><MapPin size={14} className="text-slate-500" /><span className="text-sm text-slate-300">{p.pincode}</span></div>
+                  <div className="flex items-center gap-2"><User size={13} className="text-slate-500" /><span className="text-xs text-slate-300">{lp.owner || "N/A"}</span></div>
+                  <div className="flex items-center gap-2"><Phone size={13} className="text-slate-500" /><span className="text-xs text-slate-300">{lp.ownerContact || "N/A"}</span></div>
+                  <div className="flex items-center gap-2"><MapPin size={13} className="text-slate-500" /><span className="text-xs text-slate-300">{lp.pincode || "N/A"}</span></div>
                 </div>
-              </GlassCard>
-              {p.previousPrice && (
-                <GlassCard className="p-5" hover={false}>
-                  <h3 className="font-display font-semibold text-white text-sm mb-3">Price History</h3>
-                  <div className="flex items-center gap-4">
-                    <div><p className="text-[10px] text-slate-500">Previous</p><p className="text-sm text-slate-400 line-through">{formatCurrency(p.previousPrice)}</p></div>
-                    <ArrowUpRight size={16} className="text-emerald-400" />
-                    <div><p className="text-[10px] text-slate-500">Current</p><p className="text-sm font-semibold text-emerald-400">{formatCurrency(p.price)}</p></div>
-                    <div className="ml-auto px-2.5 py-1 rounded-lg bg-emerald-400/10 text-emerald-400 text-xs font-semibold">+{((p.price - p.previousPrice) / p.previousPrice * 100).toFixed(1)}%</div>
-                  </div>
-                </GlassCard>
-              )}
-              <GlassCard className="p-5" hover={false}>
-                <h3 className="font-display font-semibold text-white text-sm mb-3">Status</h3>
-                <div className="flex gap-2">
-                  {["available", "on-hold", "sold", "draft"].map(s => (
-                    <button key={s} onClick={() => updatePropertyStatus(p.id, s)} className={`px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-all border ${p.status === s ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06] hover:bg-white/[0.08]"}`}>{s}</button>
+              </GC>
+
+              <GC className="p-4" hover={false}>
+                <h3 className="font-semibold text-white text-sm mb-2" style={{ fontFamily: "'Outfit', sans-serif" }}>Change Status</h3>
+                <div className="flex gap-1.5 flex-wrap">
+                  {["available", "on-hold", "sold", "draft"].map((s) => (
+                    <button key={s} onClick={() => updStatus(p.id, s)} disabled={saving}
+                      className={`px-2.5 py-1 rounded-lg text-[10px] font-medium capitalize border
+                        ${lp.status === s ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06] hover:bg-white/[0.08]"}`}>
+                      {s}
+                    </button>
                   ))}
                 </div>
-              </GlassCard>
-              {p.negotiationNotes && (
-                <GlassCard className="p-5" hover={false}>
-                  <h3 className="font-display font-semibold text-white text-sm mb-2">Negotiation Notes</h3>
-                  <p className="text-sm text-slate-400">{p.negotiationNotes}</p>
-                </GlassCard>
+              </GC>
+
+              {lp.negotiationNotes && (
+                <GC className="p-4" hover={false}>
+                  <h3 className="font-semibold text-white text-sm mb-2" style={{ fontFamily: "'Outfit', sans-serif" }}>Negotiation</h3>
+                  <p className="text-xs text-slate-400">{lp.negotiationNotes}</p>
+                </GC>
               )}
             </div>
           </div>
         )}
 
-        {activeTab === "notes" && (
-          <GlassCard className="p-5 space-y-4" hover={false}>
-            <h3 className="font-display font-semibold text-white text-sm">Internal Notes</h3>
+        {/* Tab: Notes */}
+        {tab === "notes" && (
+          <GC className="p-4 space-y-3" hover={false}>
+            <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Internal Notes</h3>
             <div className="flex gap-2">
-              <GlassInput placeholder="Add a private note..." value={newNote} onChange={e => setNewNote(e.target.value)} onKeyDown={e => e.key === "Enter" && addNote()} />
-              <button onClick={addNote} className="px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold flex-shrink-0">Add</button>
+              <GI placeholder="Add a note..." value={nNote} onChange={(e) => setNNote(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addNote()} />
+              <button onClick={addNote} disabled={sv}
+                className="px-3 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold flex-shrink-0 disabled:opacity-50">
+                {sv ? <Spin size={14} /> : "Add"}
+              </button>
             </div>
             <div className="space-y-2">
-              {p.notes.length === 0 && <p className="text-sm text-slate-600 py-4 text-center">No notes yet</p>}
-              {p.notes.map(n => (
-                <div key={n.id} className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-                  <p className="text-sm text-slate-300">{n.text}</p>
-                  <div className="flex items-center gap-2 mt-2 text-[11px] text-slate-600">
-                    <span>{n.author}</span><span>·</span><span>{timeAgo(n.createdAt)}</span>
+              {(lp.notes || []).length === 0 && <p className="text-xs text-slate-600 py-4 text-center">No notes yet</p>}
+              {(lp.notes || []).map((n) => (
+                <div key={n.id} className="p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
+                  <p className="text-xs text-slate-300">{n.text}</p>
+                  <div className="flex gap-2 mt-1.5 text-[10px] text-slate-600">
+                    <span>{n.author}</span><span>·</span><span>{ago(n.createdAt)}</span>
                   </div>
                 </div>
               ))}
             </div>
-          </GlassCard>
+          </GC>
         )}
 
-        {activeTab === "buyers" && (
-          <GlassCard className="p-5 space-y-4" hover={false}>
-            <h3 className="font-display font-semibold text-white text-sm">Interested Buyers</h3>
+        {/* Tab: Buyers */}
+        {tab === "buyers" && (
+          <GC className="p-4 space-y-3" hover={false}>
+            <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Interested Buyers</h3>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <GlassInput placeholder="Buyer name" value={newBuyer.name} onChange={e => setNewBuyer({ ...newBuyer, name: e.target.value })} />
-              <GlassInput placeholder="Contact" value={newBuyer.contact} onChange={e => setNewBuyer({ ...newBuyer, contact: e.target.value })} />
+              <GI placeholder="Name" value={nBuyer.name} onChange={(e) => setNBuyer({ ...nBuyer, name: e.target.value })} />
+              <GI placeholder="Contact" value={nBuyer.contact} onChange={(e) => setNBuyer({ ...nBuyer, contact: e.target.value })} />
               <div className="flex gap-2">
-                <GlassInput placeholder="Notes" value={newBuyer.notes} onChange={e => setNewBuyer({ ...newBuyer, notes: e.target.value })} />
-                <button onClick={addBuyer} className="px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold flex-shrink-0">Add</button>
+                <GI placeholder="Notes" value={nBuyer.notes} onChange={(e) => setNBuyer({ ...nBuyer, notes: e.target.value })} />
+                <button onClick={addBuy} disabled={sv}
+                  className="px-3 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold flex-shrink-0 disabled:opacity-50">
+                  {sv ? <Spin size={14} /> : "Add"}
+                </button>
               </div>
             </div>
             <div className="space-y-2">
-              {p.buyers.length === 0 && <p className="text-sm text-slate-600 py-4 text-center">No buyers tracked yet</p>}
-              {p.buyers.map(b => (
-                <div key={b.id} className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center gap-4">
-                  <div className="w-9 h-9 rounded-lg bg-purple-400/10 flex items-center justify-center text-purple-400"><User size={16} /></div>
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-slate-200">{b.name}</p>
-                    <p className="text-xs text-slate-500">{b.contact} · {b.notes}</p>
+              {(lp.buyers || []).length === 0 && <p className="text-xs text-slate-600 py-4 text-center">No buyers yet</p>}
+              {(lp.buyers || []).map((b) => (
+                <div key={b.id} className="p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-purple-400/10 flex items-center justify-center text-purple-400 flex-shrink-0"><User size={14} /></div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-slate-200">{b.name}</p>
+                    <p className="text-[10px] text-slate-500 truncate">{b.contact} · {b.notes}</p>
                   </div>
-                  <p className="text-[11px] text-slate-600">{timeAgo(b.addedAt)}</p>
+                  <p className="text-[10px] text-slate-600 flex-shrink-0">{ago(b.addedAt)}</p>
                 </div>
               ))}
             </div>
-          </GlassCard>
+          </GC>
         )}
 
-        {activeTab === "documents" && (
-          <GlassCard className="p-5 space-y-4" hover={false}>
-            <h3 className="font-display font-semibold text-white text-sm">Documents</h3>
-            <div className="border-2 border-dashed border-white/10 rounded-xl p-8 text-center hover:border-cyan-400/30 transition-all cursor-pointer">
-              <Upload size={28} className="mx-auto text-slate-500 mb-2" />
-              <p className="text-sm text-slate-400">Drag & drop files or click to upload</p>
-              <p className="text-xs text-slate-600 mt-1">Sale agreements, tax docs, legal papers</p>
-            </div>
-            <p className="text-sm text-slate-600 text-center py-2">No documents attached yet</p>
-          </GlassCard>
+        {/* Tab: Documents */}
+        {tab === "documents" && (
+          <DocTab property={lp} showT={showT} />
         )}
       </div>
     );
   };
 
-  // ── Add/Edit Property Modal ──
-  const PropertyModal = () => {
-    const [form, setForm] = useState(editingProperty || {
-      title: "", type: "plot", category: "residential", description: "", price: "", pricePerUnit: "", priceUnit: "sqft", size: "", sizeUnit: "sqft", status: "draft", owner: "", ownerContact: "", country: "India", state: "Karnataka", city: "Bangalore", area: "", pincode: "", tags: [], facing: "", nearHighway: false, cornerSite: false, approved: false, negotiationNotes: "",
+  // ═══════════════════════════════════════════════════════════
+  // ADD / EDIT MODAL
+  // ═══════════════════════════════════════════════════════════
+  const PropModal = () => {
+    const ep = editProp;
+    const fileInputRef = useRef(null);
+    const videoInputRef = useRef(null);
+    const [f, sF] = useState({
+      title: ep?.title || "", type: ep?.type || "plot", category: ep?.category || "residential",
+      description: ep?.description || "", price: ep?.price || "", previousPrice: ep?.previousPrice || "",
+      pricePerUnit: ep?.pricePerUnit || "", priceUnit: ep?.priceUnit || "sqft",
+      size: ep?.size || "", sizeUnit: ep?.sizeUnit || "sqft", status: ep?.status || "draft",
+      owner: ep?.owner || "", ownerContact: ep?.ownerContact || "",
+      country: ep?.country || "India", state: ep?.state || "Karnataka",
+      city: ep?.city || "Bangalore", area: ep?.area || "", pincode: ep?.pincode || "",
+      lat: ep?.lat || "", lng: ep?.lng || "", tags: ep?.tags || [],
+      facing: ep?.facing || "", nearHighway: ep?.nearHighway || false,
+      cornerSite: ep?.cornerSite || false, approved: ep?.approved || false,
+      negotiationNotes: ep?.negotiationNotes || "", images: ep?.images || [],
+      videoUrl: ep?.videoUrl || "", videoThumb: ep?.videoThumb || "",
     });
-    const [selectedTags, setSelectedTags] = useState(form.tags || []);
+    const [sTags, sSTags] = useState(f.tags || []);
+    const [uploading, setUploading] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(""); // status message
+    const [imgUrl, sImgUrl] = useState("");  // for manual URL paste
 
-    const toggleTag = (tag) => {
-      setSelectedTags(ts => ts.includes(tag) ? ts.filter(t => t !== tag) : [...ts, tag]);
+    const togT = (t) => sSTags((ts) => ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]);
+    const addImg = () => { if (imgUrl.trim()) { sF((prev) => ({ ...prev, images: [...(prev.images || []), imgUrl.trim()] })); sImgUrl(""); } };
+    const rmImg = (i) => sF((prev) => ({ ...prev, images: prev.images.filter((_, x) => x !== i) }));
+
+    // ─── Upload images from file picker → Cloudinary via /api/upload ───
+    const handleImageFiles = async (fileList) => {
+      const files = Array.from(fileList).filter(f => f.type.startsWith("image/"));
+      if (!files.length) return;
+      setUploading(true);
+      const propId = ep?.id || "new";
+      const uploaded = [];
+      for (let i = 0; i < files.length; i++) {
+        setUploadProgress(`Uploading image ${i + 1} of ${files.length}…`);
+        try {
+          const result = await uploadToCloudinary(files[i], propId);
+          uploaded.push(result.url);
+        } catch (err) {
+          showT(`Image ${i + 1} failed: ${err.message}`, "error");
+        }
+      }
+      if (uploaded.length) {
+        sF((prev) => ({ ...prev, images: [...(prev.images || []), ...uploaded] }));
+        showT(`${uploaded.length} image(s) uploaded`);
+      }
+      setUploadProgress("");
+      setUploading(false);
     };
 
-    const handleSubmit = () => {
-      if (!form.title || !form.price) return;
-      saveProperty({ ...form, price: Number(form.price), pricePerUnit: Number(form.pricePerUnit) || 0, size: Number(form.size) || 0, tags: selectedTags });
+    // ─── Upload video from file picker → Cloudinary via /api/upload ───
+    const handleVideoFile = async (file) => {
+      if (!file || !file.type.startsWith("video/")) { showT("Please select a video file", "error"); return; }
+      setUploading(true);
+      setUploadProgress("Uploading video… this may take a moment");
+      const propId = ep?.id || "new";
+      try {
+        const result = await uploadToCloudinary(file, propId);
+        sF((prev) => ({ ...prev, videoUrl: result.url, videoThumb: result.thumbnailUrl || "" }));
+        showT("Video uploaded");
+      } catch (err) {
+        showT("Video upload failed: " + err.message, "error");
+      }
+      setUploadProgress("");
+      setUploading(false);
+    };
+
+    // ─── Drag-and-drop handler ───
+    const handleDrop = (e) => {
+      e.preventDefault();
+      const files = e.dataTransfer.files;
+      if (!files.length) return;
+      const first = files[0];
+      if (first.type.startsWith("video/")) handleVideoFile(first);
+      else handleImageFiles(files);
+    };
+
+    const sub = () => {
+      if (!f.title || !f.price) { showT("Title & Price required", "error"); return; }
+      saveProp({
+        ...f, price: +f.price, previousPrice: f.previousPrice ? +f.previousPrice : null,
+        pricePerUnit: +f.pricePerUnit || 0, size: +f.size || 0,
+        lat: +f.lat || 0, lng: +f.lng || 0, tags: sTags,
+      });
     };
 
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => { setShowAddModal(false); setEditingProperty(null); }}>
-        <div className="w-full max-w-2xl max-h-[85vh] bg-[#111827]/95 backdrop-blur-2xl border border-white/10 rounded-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
-          <div className="p-5 border-b border-white/[0.06] flex items-center justify-between">
-            <h2 className="font-display font-bold text-lg text-white">{editingProperty ? "Edit Property" : "Add New Property"}</h2>
-            <button onClick={() => { setShowAddModal(false); setEditingProperty(null); }} className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-400 hover:text-white"><X size={18} /></button>
+      <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
+        onClick={() => { setShowAdd(false); setEditProp(null); }}>
+        <div className="w-full sm:max-w-2xl max-h-[92vh] sm:max-h-[85vh] bg-[#111827]/95 backdrop-blur-2xl
+          border border-white/10 rounded-t-2xl sm:rounded-2xl overflow-hidden"
+          onClick={(e) => e.stopPropagation()}>
+          <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
+            <h2 className="font-bold text-base text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>
+              {ep ? "Edit Property" : "Add Property"}
+            </h2>
+            <button onClick={() => { setShowAdd(false); setEditProp(null); }} className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-400">
+              <X size={18} />
+            </button>
           </div>
-          <div className="p-5 overflow-y-auto max-h-[calc(85vh-130px)] space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Title *</label><GlassInput placeholder="e.g. 2 Acre Farm Land" value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} /></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Property Type</label>
-                <GlassSelect value={form.type} onChange={e => setForm({ ...form, type: e.target.value })}>
-                  <option value="land">Land</option><option value="plot">Plot</option><option value="house">House</option><option value="commercial">Commercial</option>
-                </GlassSelect></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Category</label>
-                <GlassSelect value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>
-                  <option value="residential">Residential</option><option value="commercial">Commercial</option><option value="agricultural">Agricultural</option>
-                </GlassSelect></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Status</label>
-                <GlassSelect value={form.status} onChange={e => setForm({ ...form, status: e.target.value })}>
-                  <option value="draft">Draft</option><option value="available">Available</option><option value="on-hold">On Hold</option><option value="sold">Sold</option>
-                </GlassSelect></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Price (₹) *</label><GlassInput type="number" placeholder="4500000" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} /></div>
-              <div className="flex gap-2">
-                <div className="flex-1"><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Price Per Unit</label><GlassInput type="number" placeholder="55" value={form.pricePerUnit} onChange={e => setForm({ ...form, pricePerUnit: e.target.value })} /></div>
-                <div className="w-24"><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Unit</label>
-                  <GlassSelect value={form.priceUnit} onChange={e => setForm({ ...form, priceUnit: e.target.value })}>
-                    <option value="sqft">sqft</option><option value="acre">acre</option><option value="gunta">gunta</option>
-                  </GlassSelect></div>
+
+          <div className="p-4 overflow-y-auto max-h-[70vh] space-y-3">
+            {/* Basic Info */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Title *</label>
+                <GI placeholder="e.g. 2 Acre Farm Land" value={f.title} onChange={(e) => sF({ ...f, title: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Type</label>
+                <GS value={f.type} onChange={(e) => sF({ ...f, type: e.target.value })}>
+                  <option value="land">Land</option><option value="plot">Plot</option>
+                  <option value="house">House</option><option value="commercial">Commercial</option>
+                </GS></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Category</label>
+                <GS value={f.category} onChange={(e) => sF({ ...f, category: e.target.value })}>
+                  <option value="residential">Residential</option><option value="commercial">Commercial</option>
+                  <option value="agricultural">Agricultural</option>
+                </GS></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Status</label>
+                <GS value={f.status} onChange={(e) => sF({ ...f, status: e.target.value })}>
+                  <option value="draft">Draft</option><option value="available">Available</option>
+                  <option value="on-hold">On Hold</option><option value="sold">Sold</option>
+                </GS></div>
+            </div>
+
+            {/* Price */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Price ₹ *</label>
+                <GI type="number" placeholder="4500000" value={f.price} onChange={(e) => sF({ ...f, price: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Prev Price</label>
+                <GI type="number" value={f.previousPrice} onChange={(e) => sF({ ...f, previousPrice: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Price/Unit</label>
+                <GI type="number" value={f.pricePerUnit} onChange={(e) => sF({ ...f, pricePerUnit: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Unit</label>
+                <GS value={f.priceUnit} onChange={(e) => sF({ ...f, priceUnit: e.target.value })}>
+                  <option value="sqft">sqft</option><option value="acre">acre</option><option value="gunta">gunta</option>
+                </GS></div>
+            </div>
+
+            {/* Size */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Size</label>
+                <GI type="number" value={f.size} onChange={(e) => sF({ ...f, size: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Size Unit</label>
+                <GS value={f.sizeUnit} onChange={(e) => sF({ ...f, sizeUnit: e.target.value })}>
+                  <option value="sqft">sqft</option><option value="acres">acres</option><option value="guntas">guntas</option>
+                </GS></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Facing</label>
+                <GS value={f.facing} onChange={(e) => sF({ ...f, facing: e.target.value })}>
+                  <option value="">-</option><option value="east">East</option><option value="west">West</option>
+                  <option value="north">North</option><option value="south">South</option>
+                </GS></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Video URL</label>
+                <GI placeholder="YouTube link" value={f.videoUrl} onChange={(e) => sF({ ...f, videoUrl: e.target.value })} /></div>
+            </div>
+
+            {/* Description */}
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Description</label>
+              <GT rows={2} placeholder="Describe the property..." value={f.description} onChange={(e) => sF({ ...f, description: e.target.value })} /></div>
+
+            {/* Location */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Area</label>
+                <GI placeholder="Devanahalli" value={f.area} onChange={(e) => sF({ ...f, area: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">City</label>
+                <GI value={f.city} onChange={(e) => sF({ ...f, city: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">State</label>
+                <GI value={f.state} onChange={(e) => sF({ ...f, state: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Pincode</label>
+                <GI value={f.pincode} onChange={(e) => sF({ ...f, pincode: e.target.value })} /></div>
+            </div>
+
+            {/* Lat/Lng + Owner */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Latitude</label>
+                <GI type="number" step="any" value={f.lat} onChange={(e) => sF({ ...f, lat: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Longitude</label>
+                <GI type="number" step="any" value={f.lng} onChange={(e) => sF({ ...f, lng: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Owner</label>
+                <GI value={f.owner} onChange={(e) => sF({ ...f, owner: e.target.value })} /></div>
+              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Contact</label>
+                <GI value={f.ownerContact} onChange={(e) => sF({ ...f, ownerContact: e.target.value })} /></div>
+            </div>
+
+            {/* Images — file upload + URL paste */}
+            <div>
+              <label className="text-[10px] text-slate-500 uppercase block mb-1">Images</label>
+
+              {/* Drop zone */}
+              <div
+                onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleDrop(e); }}
+                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                className="border-2 border-dashed border-white/10 rounded-xl p-4 text-center hover:border-cyan-400/30 transition-colors cursor-pointer"
+                onClick={(e) => { e.stopPropagation(); if (!uploading) fileInputRef.current?.click(); }}
+              >
+                {uploading && uploadProgress.includes("image") ? (
+                  <div className="flex items-center justify-center gap-2 text-cyan-400">
+                    <Spin size={14} /><span className="text-xs">{uploadProgress}</span>
+                  </div>
+                ) : (
+                  <>
+                    <Upload size={18} className="mx-auto text-slate-500 mb-1" />
+                    <p className="text-xs text-slate-400">Click or drag & drop images</p>
+                    <p className="text-[10px] text-slate-600 mt-0.5">JPG, PNG, WEBP · multiple supported</p>
+                  </>
+                )}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => handleImageFiles(e.target.files)}
+                />
               </div>
-              <div className="flex gap-2">
-                <div className="flex-1"><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Size</label><GlassInput type="number" placeholder="2" value={form.size} onChange={e => setForm({ ...form, size: e.target.value })} /></div>
-                <div className="w-24"><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Unit</label>
-                  <GlassSelect value={form.sizeUnit} onChange={e => setForm({ ...form, sizeUnit: e.target.value })}>
-                    <option value="sqft">sqft</option><option value="acres">acres</option><option value="guntas">guntas</option>
-                  </GlassSelect></div>
+
+              {/* URL paste fallback */}
+              <div className="flex gap-2 mt-2">
+                <GI placeholder="Or paste image URL…" value={imgUrl} onChange={(e) => sImgUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && addImg()} />
+                <button onClick={addImg} className="px-3 py-2 bg-white/[0.08] border border-white/[0.1] rounded-xl text-xs text-slate-300 flex-shrink-0">
+                  <ImageIcon size={14} />
+                </button>
               </div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Facing</label>
-                <GlassSelect value={form.facing || ""} onChange={e => setForm({ ...form, facing: e.target.value })}>
-                  <option value="">Select</option><option value="east">East</option><option value="west">West</option><option value="north">North</option><option value="south">South</option>
-                </GlassSelect></div>
+
+              {/* Thumbnail strip */}
+              {f.images?.length > 0 && (
+                <div className="flex gap-2 mt-2 flex-wrap">
+                  {f.images.map((img, i) => (
+                    <div key={i} className="relative w-14 h-10 rounded-lg bg-cover bg-center group" style={{ backgroundImage: `url(${img})` }}>
+                      <button onClick={() => rmImg(i)}
+                        className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100">
+                        <X size={8} className="text-white" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-            <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Description</label><GlassTextarea rows={3} placeholder="Describe the property..." value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Area</label><GlassInput placeholder="Devanahalli" value={form.area} onChange={e => setForm({ ...form, area: e.target.value })} /></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">City</label><GlassInput placeholder="Bangalore" value={form.city} onChange={e => setForm({ ...form, city: e.target.value })} /></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">State</label><GlassInput placeholder="Karnataka" value={form.state} onChange={e => setForm({ ...form, state: e.target.value })} /></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Pincode</label><GlassInput placeholder="562110" value={form.pincode} onChange={e => setForm({ ...form, pincode: e.target.value })} /></div>
+
+            {/* Video upload */}
+            <div>
+              <label className="text-[10px] text-slate-500 uppercase block mb-1">Video</label>
+              <div className="flex gap-2">
+                <div
+                  className="flex-1 border-2 border-dashed border-white/10 rounded-xl p-3 flex items-center gap-3 hover:border-purple-400/30 transition-colors cursor-pointer"
+                  onClick={() => !uploading && videoInputRef.current?.click()}
+                >
+                  {uploading && uploadProgress.includes("video") ? (
+                    <div className="flex items-center gap-2 text-purple-400 w-full justify-center">
+                      <Spin size={14} /><span className="text-xs">{uploadProgress}</span>
+                    </div>
+                  ) : f.videoUrl ? (
+                    <div className="flex items-center gap-2 w-full">
+                      {f.videoThumb && <div className="w-12 h-8 rounded bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${f.videoThumb})` }} />}
+                      <p className="text-[10px] text-emerald-400 truncate flex-1">✓ Video uploaded</p>
+                      <button onClick={(e) => { e.stopPropagation(); sF((prev) => ({ ...prev, videoUrl: "", videoThumb: "" })); }}
+                        className="text-slate-500 hover:text-rose-400"><X size={13} /></button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 w-full justify-center">
+                      <Upload size={14} className="text-slate-500" />
+                      <span className="text-xs text-slate-400">Upload video (MP4, MOV)</span>
+                    </div>
+                  )}
+                  <input
+                    ref={videoInputRef}
+                    type="file"
+                    accept="video/*"
+                    className="hidden"
+                    onChange={(e) => handleVideoFile(e.target.files?.[0])}
+                  />
+                </div>
+              </div>
+              {/* Also allow YouTube / external URL */}
+              <GI className="mt-2" placeholder="Or paste YouTube / video URL" value={f.videoUrl.startsWith("http") && !f.videoUrl.includes("cloudinary") ? f.videoUrl : ""}
+                onChange={(e) => sF((prev) => ({ ...prev, videoUrl: e.target.value, videoThumb: "" }))} />
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Owner Name</label><GlassInput placeholder="Owner name" value={form.owner} onChange={e => setForm({ ...form, owner: e.target.value })} /></div>
-              <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Contact</label><GlassInput placeholder="+91 98765 43210" value={form.ownerContact} onChange={e => setForm({ ...form, ownerContact: e.target.value })} /></div>
-            </div>
-            <div className="flex gap-6">
-              {[
-                { key: "nearHighway", label: "Near Highway" },
-                { key: "cornerSite", label: "Corner Site" },
-                { key: "approved", label: "Approved" },
-              ].map(c => (
-                <label key={c.key} className="flex items-center gap-2 cursor-pointer text-sm text-slate-400">
-                  <input type="checkbox" checked={form[c.key]} onChange={e => setForm({ ...form, [c.key]: e.target.checked })} className="w-4 h-4 rounded bg-white/10 border-white/20 text-cyan-400 focus:ring-cyan-400/30" />
-                  {c.label}
+
+            {/* Toggles */}
+            <div className="flex gap-4 flex-wrap">
+              {[{ k: "nearHighway", l: "Near Highway" }, { k: "cornerSite", l: "Corner Site" }, { k: "approved", l: "Approved" }].map((c) => (
+                <label key={c.k} className="flex items-center gap-2 cursor-pointer text-xs text-slate-400">
+                  <input type="checkbox" checked={f[c.k]} onChange={(e) => sF({ ...f, [c.k]: e.target.checked })}
+                    className="w-4 h-4 rounded accent-cyan-400" />{c.l}
                 </label>
               ))}
             </div>
-            <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-2">Tags</label>
-              <div className="flex flex-wrap gap-2">
-                {TAG_OPTIONS.map(t => (
-                  <button key={t} onClick={() => toggleTag(t)} className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all border ${selectedTags.includes(t) ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06] hover:bg-white/[0.08]"}`}>{t}</button>
+
+            {/* Tags */}
+            <div>
+              <label className="text-[10px] text-slate-500 uppercase block mb-1">Tags</label>
+              <div className="flex flex-wrap gap-1.5">
+                {TAGS.map((t) => (
+                  <button key={t} onClick={() => togT(t)}
+                    className={`px-2 py-0.5 rounded-lg text-[10px] font-medium border
+                      ${sTags.includes(t) ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06]"}`}>
+                    {t}
+                  </button>
                 ))}
               </div>
             </div>
-            <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Negotiation Notes</label><GlassTextarea rows={2} placeholder="Internal negotiation notes..." value={form.negotiationNotes} onChange={e => setForm({ ...form, negotiationNotes: e.target.value })} /></div>
+
+            {/* Negotiation Notes */}
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Negotiation Notes</label>
+              <GT rows={2} placeholder="Private notes..." value={f.negotiationNotes} onChange={(e) => sF({ ...f, negotiationNotes: e.target.value })} /></div>
           </div>
-          <div className="p-5 border-t border-white/[0.06] flex justify-end gap-3">
-            <button onClick={() => { setShowAddModal(false); setEditingProperty(null); }} className="px-4 py-2.5 rounded-xl text-sm text-slate-400 hover:text-white bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08] transition-all">Cancel</button>
-            <button onClick={handleSubmit} className="px-6 py-2.5 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold hover:shadow-[0_8px_30px_-8px_rgba(0,240,255,0.4)] transition-all">{editingProperty ? "Save Changes" : "Add Property"}</button>
+
+          <div className="p-4 border-t border-white/[0.06] flex justify-end gap-2">
+            <button onClick={() => { setShowAdd(false); setEditProp(null); }}
+              className="px-3 py-2 rounded-xl text-xs text-slate-400 bg-white/[0.04] border border-white/[0.08]">Cancel</button>
+            <button onClick={sub} disabled={saving}
+              className="px-5 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold
+                disabled:opacity-50 flex items-center gap-2">
+              {saving ? <Spin size={14} /> : <Save size={14} />}
+              {ep ? "Save Changes" : "Add Property"}
+            </button>
           </div>
         </div>
       </div>
     );
   };
 
-  // ── Filter Panel ──
+  // ═══════════════════════════════════════════════════════════
+  // FILTER PANEL
+  // ═══════════════════════════════════════════════════════════
   const FilterPanel = () => (
-    <GlassCard className="p-4 space-y-3" hover={false}>
+    <GC className="p-3 space-y-2" hover={false}>
       <div className="flex items-center justify-between">
-        <h3 className="font-display font-semibold text-sm text-white flex items-center gap-2"><SlidersHorizontal size={14} /> Filters</h3>
-        <button onClick={() => setFilters({ type:"", category:"", status:"", minPrice:"", maxPrice:"", area:"", nearHighway:"", cornerSite:"", facing:"", approved:"", favoritesOnly:false })} className="text-[11px] text-cyan-400 hover:text-cyan-300">Reset</button>
+        <h3 className="font-semibold text-xs text-white flex items-center gap-2" style={{ fontFamily: "'Outfit', sans-serif" }}>
+          <SlidersHorizontal size={14} /> Filters
+        </h3>
+        <button onClick={resetFlt} className="text-[10px] text-cyan-400">Reset</button>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-        <GlassSelect value={filters.type} onChange={e => setFilters({...filters, type: e.target.value})}>
-          <option value="">All Types</option><option value="land">Land</option><option value="plot">Plot</option><option value="house">House</option><option value="commercial">Commercial</option>
-        </GlassSelect>
-        <GlassSelect value={filters.category} onChange={e => setFilters({...filters, category: e.target.value})}>
-          <option value="">All Categories</option><option value="residential">Residential</option><option value="commercial">Commercial</option><option value="agricultural">Agricultural</option>
-        </GlassSelect>
-        <GlassSelect value={filters.status} onChange={e => setFilters({...filters, status: e.target.value})}>
-          <option value="">All Status</option><option value="available">Available</option><option value="on-hold">On Hold</option><option value="sold">Sold</option><option value="draft">Draft</option>
-        </GlassSelect>
-        <GlassInput placeholder="Min price" type="number" value={filters.minPrice} onChange={e => setFilters({...filters, minPrice: e.target.value})} />
-        <GlassInput placeholder="Max price" type="number" value={filters.maxPrice} onChange={e => setFilters({...filters, maxPrice: e.target.value})} />
-        <GlassInput placeholder="Area/Locality" value={filters.area} onChange={e => setFilters({...filters, area: e.target.value})} />
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1.5">
+        <GS value={flt.type} onChange={(e) => setFlt({ ...flt, type: e.target.value })}>
+          <option value="">All Types</option><option value="land">Land</option>
+          <option value="plot">Plot</option><option value="house">House</option><option value="commercial">Commercial</option>
+        </GS>
+        <GS value={flt.category} onChange={(e) => setFlt({ ...flt, category: e.target.value })}>
+          <option value="">All Categories</option><option value="residential">Residential</option>
+          <option value="commercial">Commercial</option><option value="agricultural">Agricultural</option>
+        </GS>
+        <GS value={flt.status} onChange={(e) => setFlt({ ...flt, status: e.target.value })}>
+          <option value="">All Status</option><option value="available">Available</option>
+          <option value="on-hold">On Hold</option><option value="sold">Sold</option><option value="draft">Draft</option>
+        </GS>
+        <GI placeholder="Min ₹" type="number" value={flt.minPrice} onChange={(e) => setFlt({ ...flt, minPrice: e.target.value })} />
+        <GI placeholder="Max ₹" type="number" value={flt.maxPrice} onChange={(e) => setFlt({ ...flt, maxPrice: e.target.value })} />
+        <GI placeholder="Area" value={flt.area} onChange={(e) => setFlt({ ...flt, area: e.target.value })} />
       </div>
-      <div className="flex flex-wrap gap-2">
-        <GlassSelect className="!w-auto" value={filters.facing} onChange={e => setFilters({...filters, facing: e.target.value})}>
-          <option value="">Facing</option><option value="east">East</option><option value="west">West</option><option value="north">North</option><option value="south">South</option>
-        </GlassSelect>
-        <GlassSelect className="!w-auto" value={filters.nearHighway} onChange={e => setFilters({...filters, nearHighway: e.target.value})}>
+      <div className="flex flex-wrap gap-1.5">
+        <GS className="!w-auto !text-xs" value={flt.facing} onChange={(e) => setFlt({ ...flt, facing: e.target.value })}>
+          <option value="">Facing</option><option value="east">East</option>
+          <option value="west">West</option><option value="north">North</option><option value="south">South</option>
+        </GS>
+        <GS className="!w-auto !text-xs" value={flt.nearHighway} onChange={(e) => setFlt({ ...flt, nearHighway: e.target.value })}>
           <option value="">Highway</option><option value="true">Near Highway</option>
-        </GlassSelect>
-        <GlassSelect className="!w-auto" value={filters.cornerSite} onChange={e => setFilters({...filters, cornerSite: e.target.value})}>
-          <option value="">Corner</option><option value="true">Corner Site</option>
-        </GlassSelect>
-        <GlassSelect className="!w-auto" value={filters.approved} onChange={e => setFilters({...filters, approved: e.target.value})}>
-          <option value="">Approval</option><option value="true">Approved</option>
-        </GlassSelect>
-        <button onClick={() => setFilters({...filters, favoritesOnly: !filters.favoritesOnly})} className={`px-3 py-2 rounded-xl text-xs font-medium border transition-all ${filters.favoritesOnly ? "bg-rose-400/15 text-rose-400 border-rose-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06]"}`}>
-          <Heart size={12} className="inline mr-1" fill={filters.favoritesOnly ? "currentColor" : "none"} />Favorites
+        </GS>
+        <button onClick={() => setFlt({ ...flt, favOnly: !flt.favOnly })}
+          className={`px-2.5 py-2 rounded-xl text-[10px] font-medium border
+            ${flt.favOnly ? "bg-rose-400/15 text-rose-400 border-rose-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06]"}`}>
+          <Heart size={11} className="inline mr-1" fill={flt.favOnly ? "currentColor" : "none"} />Favs
         </button>
       </div>
-    </GlassCard>
+    </GC>
   );
 
-  // ── Properties Page ──
-  const PropertiesPage = () => (
-    <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-      {selectedProperty ? <PropertyDetail property={selectedProperty} /> : (
+  // ═══════════════════════════════════════════════════════════
+  // PROPERTIES PAGE
+  // ═══════════════════════════════════════════════════════════
+  const PropsPage = () => (
+    <div className="space-y-3 animate-[fadeIn_0.3s]">
+      {selProp ? <PDetail property={selProp} /> : (
         <>
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="font-display text-2xl font-bold text-white">Properties</h1>
-              <p className="text-slate-500 text-sm mt-1">{filteredProperties.length} of {properties.length} properties</p>
+              <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Properties</h1>
+              <p className="text-slate-500 text-xs mt-0.5">{filtered.length} of {props.length}</p>
             </div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setShowFilters(!showFilters)} className={`p-2.5 rounded-xl border transition-all ${showFilters ? "bg-cyan-400/10 text-cyan-400 border-cyan-400/20" : "bg-white/[0.04] text-slate-400 border-white/[0.08] hover:bg-white/[0.08]"}`}><Filter size={16} /></button>
-              <button onClick={() => setViewMode("grid")} className={`p-2.5 rounded-xl border transition-all ${viewMode === "grid" ? "bg-cyan-400/10 text-cyan-400 border-cyan-400/20" : "bg-white/[0.04] text-slate-400 border-white/[0.08]"}`}><Grid size={16} /></button>
-              <button onClick={() => setViewMode("list")} className={`p-2.5 rounded-xl border transition-all ${viewMode === "list" ? "bg-cyan-400/10 text-cyan-400 border-cyan-400/20" : "bg-white/[0.04] text-slate-400 border-white/[0.08]"}`}><List size={16} /></button>
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => setShowFilter(!showFilter)}
+                className={`p-2 rounded-xl border ${showFilter ? "bg-cyan-400/10 text-cyan-400 border-cyan-400/20" : "bg-white/[0.04] text-slate-400 border-white/[0.08]"}`}>
+                <Filter size={15} /></button>
+              <button onClick={() => setViewMode("grid")}
+                className={`p-2 rounded-xl border hidden sm:block ${viewMode === "grid" ? "bg-cyan-400/10 text-cyan-400 border-cyan-400/20" : "bg-white/[0.04] text-slate-400 border-white/[0.08]"}`}>
+                <Grid size={15} /></button>
+              <button onClick={() => setViewMode("list")}
+                className={`p-2 rounded-xl border hidden sm:block ${viewMode === "list" ? "bg-cyan-400/10 text-cyan-400 border-cyan-400/20" : "bg-white/[0.04] text-slate-400 border-white/[0.08]"}`}>
+                <List size={15} /></button>
             </div>
           </div>
-          {showFilters && <FilterPanel />}
+
+          {showFilter && <FilterPanel />}
+
           {viewMode === "grid" ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredProperties.map(p => <PropertyCard key={p.id} property={p} />)}
+            <div className="grid grid-cols-1 min-[480px]:grid-cols-2 xl:grid-cols-3 gap-3">
+              {filtered.map((p) => <PCard key={p.id} property={p} />)}
             </div>
           ) : (
             <div className="space-y-2">
-              {filteredProperties.map(p => <PropertyListItem key={p.id} property={p} />)}
+              {filtered.map((p) => (
+                <GC key={p.id} className="p-3 flex items-center gap-3 group" onClick={() => setSelProp(p)}>
+                  {p.images?.[0]
+                    ? <div className="w-14 h-11 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${p.images[0]})` }} />
+                    : <div className="w-14 h-11 rounded-lg bg-white/[0.06] flex items-center justify-center flex-shrink-0"><Building2 size={14} className="text-slate-600" /></div>
+                  }
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-xs font-semibold text-white truncate" style={{ fontFamily: "'Outfit', sans-serif" }}>{p.title}</p>
+                      <SB status={p.status} />
+                    </div>
+                    <div className="flex gap-2 mt-0.5 text-[10px] text-slate-500">
+                      <span><MapPin size={9} className="inline" /> {p.area}</span>
+                      <span>{p.size} {p.sizeUnit}</span>
+                    </div>
+                  </div>
+                  <p className="font-bold text-cyan-400 text-xs flex-shrink-0">{fmt(p.price)}</p>
+                  <div className="hidden sm:flex gap-0.5 opacity-0 group-hover:opacity-100">
+                    <button onClick={(e) => { e.stopPropagation(); togFav(p.id); }}
+                      className={`p-1.5 rounded-lg ${p.isFavorite ? "text-rose-400" : "text-slate-500"}`}>
+                      <Heart size={13} fill={p.isFavorite ? "currentColor" : "none"} /></button>
+                    <button onClick={(e) => { e.stopPropagation(); setEditProp(p); setShowAdd(true); }}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-white"><Edit size={13} /></button>
+                    <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400"><Trash2 size={13} /></button>
+                  </div>
+                </GC>
+              ))}
             </div>
           )}
-          {filteredProperties.length === 0 && (
-            <div className="text-center py-16">
-              <Building2 size={40} className="mx-auto text-slate-700 mb-3" />
-              <p className="text-slate-500 text-sm">No properties match your filters</p>
-              <button onClick={() => setFilters({ type:"", category:"", status:"", minPrice:"", maxPrice:"", area:"", nearHighway:"", cornerSite:"", facing:"", approved:"", favoritesOnly:false })} className="text-cyan-400 text-sm mt-2 hover:underline">Reset filters</button>
+
+          {filtered.length === 0 && !loading && (
+            <div className="text-center py-12">
+              <Building2 size={36} className="mx-auto text-slate-700 mb-3" />
+              <p className="text-slate-500 text-sm">{props.length === 0 ? "No properties yet. Add your first one!" : "No properties match your filters"}</p>
+              {props.length === 0
+                ? <button onClick={() => setShowAdd(true)} className="mt-3 px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold">Add First Property</button>
+                : <button onClick={resetFlt} className="text-cyan-400 text-sm mt-2 hover:underline">Reset filters</button>
+              }
             </div>
           )}
         </>
@@ -799,44 +1629,47 @@ export default function PropertyNexus() {
     </div>
   );
 
-  // ── Favorites Page ──
-  const FavoritesPage = () => {
-    const favs = properties.filter(p => p.isFavorite);
+  // ═══════════════════════════════════════════════════════════
+  // OTHER PAGES
+  // ═══════════════════════════════════════════════════════════
+  const FavsPage = () => {
+    const fv = props.filter((p) => p.isFavorite);
     return (
-      <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-        {selectedProperty ? <PropertyDetail property={selectedProperty} /> : (
+      <div className="space-y-3 animate-[fadeIn_0.3s]">
+        {selProp ? <PDetail property={selProp} /> : (
           <>
-            <div><h1 className="font-display text-2xl font-bold text-white">Favorites</h1><p className="text-slate-500 text-sm mt-1">{favs.length} shortlisted properties</p></div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-              {favs.map(p => <PropertyCard key={p.id} property={p} />)}
+            <div><h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Favorites</h1>
+              <p className="text-slate-500 text-xs mt-1">{fv.length} shortlisted</p></div>
+            <div className="grid grid-cols-1 min-[480px]:grid-cols-2 xl:grid-cols-3 gap-3">
+              {fv.map((p) => <PCard key={p.id} property={p} />)}
             </div>
-            {favs.length === 0 && <div className="text-center py-16"><Heart size={40} className="mx-auto text-slate-700 mb-3" /><p className="text-slate-500">No favorites yet</p></div>}
+            {fv.length === 0 && <div className="text-center py-16"><Heart size={36} className="mx-auto text-slate-700 mb-3" /><p className="text-slate-500 text-sm">No favorites yet</p></div>}
           </>
         )}
       </div>
     );
   };
 
-  // ── Deals Page ──
   const DealsPage = () => {
-    const deals = properties.filter(p => p.buyers.length > 0 || p.status === "sold" || p.status === "on-hold");
+    const deals = props.filter((p) => (p.buyers || []).length > 0 || p.status === "sold" || p.status === "on-hold");
     return (
-      <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-        <div><h1 className="font-display text-2xl font-bold text-white">Deal Tracker</h1><p className="text-slate-500 text-sm mt-1">Track negotiations and buyer interest</p></div>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {["on-hold", "available", "sold"].map(status => (
+      <div className="space-y-3 animate-[fadeIn_0.3s]">
+        <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Deal Tracker</h1>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {["on-hold", "available", "sold"].map((status) => (
             <div key={status}>
-              <div className="flex items-center gap-2 mb-3"><StatusBadge status={status} /><span className="text-xs text-slate-500">({deals.filter(d => d.status === status).length})</span></div>
+              <div className="flex items-center gap-2 mb-2"><SB status={status} /><span className="text-[10px] text-slate-500">({deals.filter((d) => d.status === status).length})</span></div>
               <div className="space-y-2">
-                {deals.filter(d => d.status === status).map(d => (
-                  <GlassCard key={d.id} className="p-4" onClick={() => { setSelectedProperty(d); setActivePage("properties"); }}>
-                    <p className="font-display font-semibold text-sm text-white">{d.title}</p>
-                    <p className="text-cyan-400 font-semibold text-sm mt-1">{formatCurrency(d.price)}</p>
-                    {d.buyers.length > 0 && <div className="mt-2 space-y-1">{d.buyers.map(b => <div key={b.id} className="text-xs text-slate-500 flex items-center gap-1"><User size={10} />{b.name}</div>)}</div>}
-                    {d.finalSellingPrice && <p className="text-xs text-emerald-400 mt-2">Sold: {formatCurrency(d.finalSellingPrice)}</p>}
-                    {d.negotiationNotes && <p className="text-xs text-slate-600 mt-1 italic">{d.negotiationNotes}</p>}
-                  </GlassCard>
+                {deals.filter((d) => d.status === status).map((d) => (
+                  <GC key={d.id} className="p-3" onClick={() => { setSelProp(d); setPage("properties"); }}>
+                    <p className="font-semibold text-xs text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>{d.title}</p>
+                    <p className="text-cyan-400 font-semibold text-xs mt-1">{fmt(d.price)}</p>
+                    {(d.buyers || []).length > 0 && <div className="mt-1">{d.buyers.map((b) => (
+                      <div key={b.id} className="text-[10px] text-slate-500"><User size={9} className="inline mr-1" />{b.name}</div>
+                    ))}</div>}
+                  </GC>
                 ))}
+                {deals.filter((d) => d.status === status).length === 0 && <p className="text-xs text-slate-600 text-center py-4">No deals</p>}
               </div>
             </div>
           ))}
@@ -845,300 +1678,278 @@ export default function PropertyNexus() {
     );
   };
 
-  // ── Map Page ──
   const MapPage = () => (
-    <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-      <div><h1 className="font-display text-2xl font-bold text-white">Map View</h1><p className="text-slate-500 text-sm mt-1">Visualize property locations</p></div>
-      <GlassCard className="p-0 overflow-hidden h-[500px] relative" hover={false}>
-        <div className="absolute inset-0 bg-[#0d1117] flex items-center justify-center">
-          <div className="relative w-full h-full p-8">
-            <div className="absolute inset-0 opacity-20" style={{backgroundImage:"radial-gradient(circle at 1px 1px, rgba(255,255,255,0.15) 1px, transparent 0)",backgroundSize:"40px 40px"}}/>
-            {properties.filter(p => p.lat && p.lng).map(p => {
+    <div className="space-y-3 animate-[fadeIn_0.3s]">
+      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Map View</h1>
+      <GC className="overflow-hidden relative" hover={false} style={{ height: "calc(100vh - 180px)", minHeight: "400px" }}>
+        <div className="absolute inset-0 bg-[#0d1117]">
+          <div className="relative w-full h-full p-4">
+            <div className="absolute inset-0 opacity-20" style={{ backgroundImage: "radial-gradient(circle at 1px 1px,rgba(255,255,255,0.15) 1px,transparent 0)", backgroundSize: "40px 40px" }} />
+            {props.filter((p) => p.lat && p.lng).map((p) => {
               const x = ((p.lng - 77.3) / 0.6) * 100;
               const y = (1 - (p.lat - 12.8) / 0.5) * 100;
               return (
-                <button key={p.id} onClick={() => { setSelectedProperty(p); setActivePage("properties"); }} className="absolute transform -translate-x-1/2 -translate-y-1/2 group z-10" style={{ left: `${Math.min(90, Math.max(10, x))}%`, top: `${Math.min(90, Math.max(10, y))}%` }}>
-                  <div className={`w-4 h-4 rounded-full border-2 border-white/30 shadow-lg transition-all group-hover:scale-150 ${p.status === "available" ? "bg-emerald-400" : p.status === "sold" ? "bg-rose-400" : p.status === "on-hold" ? "bg-amber-400" : "bg-slate-400"}`}>
-                    <div className={`absolute w-4 h-4 rounded-full animate-ping opacity-30 ${p.status === "available" ? "bg-emerald-400" : "bg-transparent"}`} />
-                  </div>
-                  <div className="absolute bottom-6 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-all bg-[#111827]/95 backdrop-blur-sm border border-white/10 rounded-xl p-3 w-48 pointer-events-none z-20">
-                    <p className="text-xs font-semibold text-white truncate">{p.title}</p>
-                    <p className="text-[10px] text-slate-500 mt-0.5">{p.area}</p>
-                    <p className="text-xs text-cyan-400 font-semibold mt-1">{formatCurrency(p.price)}</p>
+                <button key={p.id} onClick={() => { setSelProp(p); setPage("properties"); }}
+                  className="absolute -translate-x-1/2 -translate-y-1/2 group z-10"
+                  style={{ left: `${Math.min(90, Math.max(10, x))}%`, top: `${Math.min(90, Math.max(10, y))}%` }}>
+                  <div className={`w-3.5 h-3.5 rounded-full border-2 border-white/30 shadow-lg group-hover:scale-150 transition-all
+                    ${p.status === "available" ? "bg-emerald-400" : p.status === "sold" ? "bg-rose-400" : p.status === "on-hold" ? "bg-amber-400" : "bg-slate-400"}`} />
+                  <div className="absolute bottom-5 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 bg-[#111827]/95 border border-white/10 rounded-xl p-2.5 w-40 pointer-events-none z-20">
+                    <p className="text-[10px] font-semibold text-white truncate">{p.title}</p>
+                    <p className="text-[9px] text-slate-500">{p.area}</p>
+                    <p className="text-[10px] text-cyan-400 font-semibold mt-1">{fmt(p.price)}</p>
                   </div>
                 </button>
               );
             })}
-            <div className="absolute bottom-4 left-4 bg-[#111827]/80 backdrop-blur-sm border border-white/10 rounded-xl p-3 space-y-1.5">
-              {[{l:"Available",c:"bg-emerald-400"},{l:"On Hold",c:"bg-amber-400"},{l:"Sold",c:"bg-rose-400"},{l:"Draft",c:"bg-slate-400"}].map(i=>(
-                <div key={i.l} className="flex items-center gap-2 text-[11px] text-slate-400"><div className={`w-2.5 h-2.5 rounded-full ${i.c}`}/>{i.l}</div>
+            <div className="absolute bottom-3 left-3 bg-[#111827]/80 border border-white/10 rounded-xl p-2.5 space-y-1">
+              {[{ l: "Available", c: "bg-emerald-400" }, { l: "On Hold", c: "bg-amber-400" }, { l: "Sold", c: "bg-rose-400" }, { l: "Draft", c: "bg-slate-400" }].map((i) => (
+                <div key={i.l} className="flex items-center gap-2 text-[10px] text-slate-400"><div className={`w-2 h-2 rounded-full ${i.c}`} />{i.l}</div>
               ))}
             </div>
-            <p className="absolute top-4 right-4 text-[11px] text-slate-600">Bangalore Region · Connect Google Maps API for live maps</p>
           </div>
         </div>
-      </GlassCard>
+      </GC>
     </div>
   );
 
-  // ── Documents Page ──
-  const DocumentsPage = () => (
-    <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-      <div><h1 className="font-display text-2xl font-bold text-white">Documents</h1><p className="text-slate-500 text-sm mt-1">Manage property documents</p></div>
-      <GlassCard className="p-8 text-center" hover={false}>
-        <FolderOpen size={40} className="mx-auto text-slate-600 mb-3" />
-        <p className="text-slate-400 text-sm">Upload and manage documents per property</p>
-        <p className="text-slate-600 text-xs mt-1">Sale agreements, tax documents, legal papers</p>
-        <div className="border-2 border-dashed border-white/10 rounded-xl p-8 mt-4 hover:border-cyan-400/30 transition-all cursor-pointer">
-          <Upload size={24} className="mx-auto text-slate-500 mb-2" />
-          <p className="text-sm text-slate-400">Drag & drop files here</p>
-        </div>
-      </GlassCard>
-      <div className="space-y-2">
-        {properties.filter(p => p.notes.length > 0).map(p => (
-          <GlassCard key={p.id} className="p-4 flex items-center gap-4" hover={false}>
-            <div className="w-10 h-10 rounded-xl bg-purple-400/10 flex items-center justify-center text-purple-400"><FileText size={18} /></div>
-            <div className="flex-1"><p className="text-sm font-medium text-white">{p.title}</p><p className="text-xs text-slate-500">{p.notes.length} notes attached</p></div>
-            <button onClick={() => { setSelectedProperty(p); setActivePage("properties"); }} className="text-xs text-cyan-400 hover:underline">View</button>
-          </GlassCard>
-        ))}
-      </div>
+  const DocsPage = () => (
+    <div className="space-y-3 animate-[fadeIn_0.3s]">
+      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents</h1>
+      <GC className="p-6 text-center" hover={false}>
+        <FolderOpen size={36} className="mx-auto text-slate-600 mb-3" />
+        <p className="text-slate-400 text-xs">Upload documents from property detail view</p>
+      </GC>
     </div>
   );
 
-  // ── Analytics Page ──
-  const AnalyticsPage = () => {
-    const priceByArea = useMemo(() => {
+  const AnalPage = () => {
+    const pba = useMemo(() => {
       const areas = {};
-      properties.forEach(p => { if (!areas[p.area]) areas[p.area] = { area: p.area, total: 0, count: 0 }; areas[p.area].total += p.price; areas[p.area].count++; });
-      return Object.values(areas).map(a => ({ ...a, avg: a.total / a.count })).sort((a, b) => b.avg - a.avg);
-    }, [properties]);
+      props.forEach((p) => {
+        if (p.area) {
+          if (!areas[p.area]) areas[p.area] = { area: p.area, total: 0, count: 0 };
+          areas[p.area].total += +p.price || 0;
+          areas[p.area].count++;
+        }
+      });
+      return Object.values(areas).map((a) => ({ ...a, avg: a.total / a.count })).sort((a, b) => b.avg - a.avg);
+    }, [props]);
 
     return (
-      <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-        <div><h1 className="font-display text-2xl font-bold text-white">Analytics</h1><p className="text-slate-500 text-sm mt-1">Insights and trends</p></div>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <GlassCard className="p-5" hover={false}>
-            <h3 className="font-display font-semibold text-sm text-white mb-4">Avg Price by Area</h3>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={priceByArea.slice(0, 6)} layout="vertical">
+      <div className="space-y-3 animate-[fadeIn_0.3s]">
+        <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Analytics</h1>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <GC className="p-4" hover={false}>
+            <h3 className="font-semibold text-xs text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Avg Price by Area</h3>
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={pba.slice(0, 6)} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                <XAxis type="number" tick={{ fill: "#64748b", fontSize: 11 }} tickFormatter={v => formatCurrency(v)} />
-                <YAxis dataKey="area" type="category" tick={{ fill: "#94a3b8", fontSize: 11 }} width={100} />
-                <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 12, color: "#e2e8f0" }} formatter={v => formatCurrency(v)} />
+                <XAxis type="number" tick={{ fill: "#64748b", fontSize: 10 }} tickFormatter={(v) => fmt(v)} />
+                <YAxis dataKey="area" type="category" tick={{ fill: "#94a3b8", fontSize: 10 }} width={80} />
+                <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} formatter={(v) => fmt(v)} />
                 <Bar dataKey="avg" fill="#00f0ff" radius={[0, 6, 6, 0]} />
               </BarChart>
             </ResponsiveContainer>
-          </GlassCard>
-          <GlassCard className="p-5" hover={false}>
-            <h3 className="font-display font-semibold text-sm text-white mb-4">Property Views</h3>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={properties.sort((a, b) => b.views - a.views).slice(0, 6).map(p => ({ name: p.title.substring(0, 15) + "...", views: p.views }))}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                <XAxis dataKey="name" tick={{ fill: "#64748b", fontSize: 10 }} angle={-20} textAnchor="end" height={60} />
-                <YAxis tick={{ fill: "#64748b", fontSize: 11 }} />
-                <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 12, color: "#e2e8f0" }} />
-                <Bar dataKey="views" fill="#a855f7" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </GlassCard>
-          <GlassCard className="p-5" hover={false}>
-            <h3 className="font-display font-semibold text-sm text-white mb-4">Sales Trend</h3>
-            <ResponsiveContainer width="100%" height={250}>
-              <LineChart data={SALES_DATA}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                <XAxis dataKey="month" tick={{ fill: "#64748b", fontSize: 12 }} />
-                <YAxis tick={{ fill: "#64748b", fontSize: 12 }} />
-                <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 12, color: "#e2e8f0" }} />
-                <Line type="monotone" dataKey="value" stroke="#34d399" strokeWidth={2} dot={{ fill: "#34d399", r: 4 }} />
-                <Line type="monotone" dataKey="sales" stroke="#fbbf24" strokeWidth={2} dot={{ fill: "#fbbf24", r: 4 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          </GlassCard>
-          <GlassCard className="p-5" hover={false}>
-            <h3 className="font-display font-semibold text-sm text-white mb-4">Portfolio Breakdown</h3>
-            <div className="space-y-3">
+          </GC>
+          <GC className="p-4" hover={false}>
+            <h3 className="font-semibold text-xs text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Portfolio Stats</h3>
+            <div className="space-y-2">
               {[
-                { label: "Total Portfolio Value", value: formatCurrency(stats.totalValue), sub: "Active listings" },
-                { label: "Average Price", value: formatCurrency(stats.totalValue / (stats.available || 1)), sub: "Per property" },
-                { label: "Total Sold Value", value: formatCurrency(stats.totalSoldValue), sub: `${stats.sold} properties` },
-                { label: "Conversion Rate", value: `${((stats.sold / stats.total) * 100).toFixed(1)}%`, sub: "Sold / Total" },
-                { label: "Properties with Buyers", value: properties.filter(p => p.buyers.length > 0).length.toString(), sub: "Active interest" },
-              ].map((item, i) => (
-                <div key={i} className="flex items-center justify-between py-2 border-b border-white/[0.04] last:border-0">
-                  <div><p className="text-sm text-slate-300">{item.label}</p><p className="text-[11px] text-slate-600">{item.sub}</p></div>
-                  <p className="font-display font-bold text-white">{item.value}</p>
+                { l: "Portfolio Value", v: fmt(st.tv) },
+                { l: "Avg Price", v: fmt(st.tv / (st.a || 1)) },
+                { l: "Sold Value", v: fmt(st.sv) },
+                { l: "Conversion", v: `${((st.s / Math.max(st.t, 1)) * 100).toFixed(1)}%` },
+                { l: "With Buyers", v: props.filter((p) => (p.buyers || []).length > 0).length + "" },
+              ].map((x, i) => (
+                <div key={i} className="flex justify-between py-1.5 border-b border-white/[0.04] last:border-0">
+                  <span className="text-xs text-slate-400">{x.l}</span>
+                  <span className="font-bold text-white text-xs">{x.v}</span>
                 </div>
               ))}
             </div>
-          </GlassCard>
+          </GC>
         </div>
       </div>
     );
   };
 
-  // ── Users Page ──
-  const UsersPage = () => (
-    <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-      <div className="flex items-center justify-between">
-        <div><h1 className="font-display text-2xl font-bold text-white">User Management</h1><p className="text-slate-500 text-sm mt-1">Manage roles and access</p></div>
-        <button className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold"><Plus size={16} /> Add User</button>
-      </div>
-      <div className="space-y-2">
-        {[
-          { name: "Admin", email: "admin@propertynexus.com", role: "admin", color: "cyan" },
-          { name: "Rahul Agent", email: "rahul@propertynexus.com", role: "agent", color: "purple" },
-          { name: "Viewer Account", email: "viewer@propertynexus.com", role: "viewer", color: "slate" },
-        ].map((u, i) => (
-          <GlassCard key={i} className="p-4 flex items-center gap-4" hover={false}>
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold text-sm ${u.color === "cyan" ? "bg-gradient-to-br from-cyan-500 to-blue-500" : u.color === "purple" ? "bg-gradient-to-br from-purple-500 to-rose-500" : "bg-gradient-to-br from-slate-500 to-slate-600"}`}>{u.name[0]}</div>
-            <div className="flex-1"><p className="text-sm font-medium text-white">{u.name}</p><p className="text-xs text-slate-500">{u.email}</p></div>
-            <span className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold uppercase ${u.role === "admin" ? "bg-cyan-400/15 text-cyan-400" : u.role === "agent" ? "bg-purple-400/15 text-purple-400" : "bg-slate-400/15 text-slate-400"}`}>{u.role}</span>
-            <button className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-500"><MoreHorizontal size={16} /></button>
-          </GlassCard>
-        ))}
-      </div>
-      <GlassCard className="p-5 space-y-3" hover={false}>
-        <h3 className="font-display font-semibold text-sm text-white flex items-center gap-2"><Shield size={14} /> Role Permissions</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr className="text-slate-500 text-xs uppercase">
-              <th className="text-left py-2 px-3">Permission</th><th className="text-center py-2 px-3">Admin</th><th className="text-center py-2 px-3">Agent</th><th className="text-center py-2 px-3">Viewer</th>
-            </tr></thead>
-            <tbody>
-              {["Add/Edit Properties","Delete Properties","View All Properties","Manage Users","View Analytics","Export Data","Manage Deals","View Documents"].map(p => (
-                <tr key={p} className="border-t border-white/[0.04]">
-                  <td className="py-2.5 px-3 text-slate-300">{p}</td>
-                  <td className="text-center"><CheckCircle size={14} className="inline text-emerald-400" /></td>
-                  <td className="text-center">{["Add/Edit Properties","View All Properties","View Analytics","Manage Deals","View Documents"].includes(p) ? <CheckCircle size={14} className="inline text-emerald-400" /> : <X size={14} className="inline text-slate-600" />}</td>
-                  <td className="text-center">{["View All Properties","View Documents"].includes(p) ? <CheckCircle size={14} className="inline text-emerald-400" /> : <X size={14} className="inline text-slate-600" />}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </GlassCard>
-    </div>
-  );
-
-  // ── Audit Logs Page ──
   const AuditPage = () => (
-    <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-      <div><h1 className="font-display text-2xl font-bold text-white">Audit Logs</h1><p className="text-slate-500 text-sm mt-1">Security and change tracking</p></div>
-      <GlassCard className="p-5" hover={false}>
+    <div className="space-y-3 animate-[fadeIn_0.3s]">
+      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Audit Logs</h1>
+      <p className="text-slate-500 text-xs">Live change tracking from Firebase</p>
+      <GC className="p-4" hover={false}>
         <div className="space-y-2">
-          {[
-            { action:"Property Created", detail:"Added '40x60 Plot - Electronic City'", user:"Admin", time:"2025-03-25 08:00", icon:Plus, color:"text-emerald-400" },
-            { action:"Price Updated", detail:"'3BHK Villa - Whitefield' ₹1.7Cr → ₹1.85Cr", user:"Admin", time:"2025-03-22 11:00", icon:TrendingUp, color:"text-amber-400" },
-            { action:"Status Changed", detail:"'5 Acre Agricultural Land' → Sold", user:"Admin", time:"2025-03-01 10:00", icon:CheckCircle, color:"text-cyan-400" },
-            { action:"Property Edited", detail:"Updated '2 Acre Premium Farm Land' details", user:"Admin", time:"2025-02-28 14:30", icon:Edit, color:"text-purple-400" },
-            { action:"User Login", detail:"Admin logged in from 103.21.xx.xx", user:"System", time:"2025-03-25 07:45", icon:Shield, color:"text-slate-400" },
-            { action:"Buyer Added", detail:"Vikram Singh added to '3BHK Villa'", user:"Admin", time:"2025-03-10 09:00", icon:User, color:"text-emerald-400" },
-            { action:"Document Uploaded", detail:"Sale deed for prop_003", user:"Admin", time:"2025-03-08 16:20", icon:Upload, color:"text-purple-400" },
-          ].map((log, i) => (
-            <div key={i} className="flex items-start gap-3 p-3 rounded-xl hover:bg-white/[0.03] transition-all">
-              <div className={`w-8 h-8 rounded-lg bg-white/[0.06] flex items-center justify-center flex-shrink-0 ${log.color}`}><log.icon size={14} /></div>
-              <div className="flex-1">
-                <p className="text-sm text-slate-200 font-medium">{log.action}</p>
-                <p className="text-xs text-slate-500 mt-0.5">{log.detail}</p>
+          {audits.length === 0 && <p className="text-xs text-slate-600 text-center py-8">Changes will appear here in real-time</p>}
+          {audits.slice(0, 30).map((l) => (
+            <div key={l.id} className="flex items-start gap-2 p-2 rounded-xl hover:bg-white/[0.03]">
+              <div className="w-7 h-7 rounded-lg bg-white/[0.06] flex items-center justify-center flex-shrink-0 text-cyan-400">
+                {l.action?.includes("Created") ? <Plus size={13} /> : l.action?.includes("Updated") ? <Edit size={13} /> : l.action?.includes("Deleted") ? <Trash2 size={13} /> : <Activity size={13} />}
               </div>
-              <div className="text-right">
-                <p className="text-[11px] text-slate-600">{log.user}</p>
-                <p className="text-[10px] text-slate-700">{log.time}</p>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-slate-200 font-medium">{l.action}</p>
+                <p className="text-[10px] text-slate-500 truncate">{l.details}</p>
+              </div>
+              <div className="text-right flex-shrink-0">
+                <p className="text-[10px] text-slate-600">{l.userName}</p>
+                <p className="text-[9px] text-slate-700">{ago(l.timestamp)}</p>
               </div>
             </div>
           ))}
         </div>
-      </GlassCard>
+      </GC>
     </div>
   );
 
-  // ── Settings Page ──
-  const SettingsPage = () => (
-    <div className="space-y-4 animate-[fadeIn_0.3s_ease-out]">
-      <div><h1 className="font-display text-2xl font-bold text-white">Settings</h1><p className="text-slate-500 text-sm mt-1">Configure your workspace</p></div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <GlassCard className="p-5 space-y-4" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white flex items-center gap-2"><User size={14} /> Profile</h3>
-          <div className="space-y-3">
-            <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Name</label><GlassInput defaultValue="Admin" /></div>
-            <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Email</label><GlassInput defaultValue="admin@propertynexus.com" /></div>
-            <button className="px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-sm font-bold">Save Changes</button>
-          </div>
-        </GlassCard>
-        <GlassCard className="p-5 space-y-4" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white flex items-center gap-2"><Lock size={14} /> Security</h3>
-          <div className="space-y-3">
-            <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">Current Password</label><GlassInput type="password" placeholder="••••••••" /></div>
-            <div><label className="text-[11px] text-slate-500 uppercase tracking-wider block mb-1.5">New Password</label><GlassInput type="password" placeholder="••••••••" /></div>
-            <button className="px-4 py-2 bg-white/[0.08] border border-white/[0.1] rounded-xl text-sm text-slate-300 hover:bg-white/[0.12] transition-all">Update Password</button>
-          </div>
-        </GlassCard>
-        <GlassCard className="p-5 space-y-4" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white flex items-center gap-2"><Bell size={14} /> Notifications</h3>
-          {["Price changes","Status updates","New properties","Unsold reminders"].map(n => (
-            <label key={n} className="flex items-center justify-between cursor-pointer">
-              <span className="text-sm text-slate-400">{n}</span>
-              <div className="w-10 h-6 bg-cyan-400/30 rounded-full relative"><div className="w-4 h-4 bg-cyan-400 rounded-full absolute top-1 right-1 transition-all" /></div>
-            </label>
-          ))}
-        </GlassCard>
-        <GlassCard className="p-5 space-y-4" hover={false}>
-          <h3 className="font-display font-semibold text-sm text-white flex items-center gap-2"><Zap size={14} /> Automation</h3>
-          {["Auto-generate property IDs","Auto watermark images","Unsold property reminders (60 days)","AI description generator"].map(n => (
-            <label key={n} className="flex items-center justify-between cursor-pointer">
-              <span className="text-sm text-slate-400">{n}</span>
-              <div className="w-10 h-6 bg-cyan-400/30 rounded-full relative"><div className="w-4 h-4 bg-cyan-400 rounded-full absolute top-1 right-1 transition-all" /></div>
-            </label>
-          ))}
-        </GlassCard>
+  const UsersPage2 = () => (
+    <div className="space-y-3 animate-[fadeIn_0.3s]">
+      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Users</h1>
+      <div className="space-y-2">
+        {[
+          { n: "Admin", e: "admin@propertynexus.com", r: "admin", g: "from-cyan-500 to-blue-500" },
+          { n: "Agent", e: "agent@propertynexus.com", r: "agent", g: "from-purple-500 to-rose-500" },
+        ].map((u, i) => (
+          <GC key={i} className="p-3 flex items-center gap-3" hover={false}>
+            <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-sm bg-gradient-to-br ${u.g} flex-shrink-0`}>{u.n[0]}</div>
+            <div className="flex-1 min-w-0"><p className="text-xs font-medium text-white">{u.n}</p><p className="text-[10px] text-slate-500 truncate">{u.e}</p></div>
+            <span className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold uppercase ${u.r === "admin" ? "bg-cyan-400/15 text-cyan-400" : "bg-purple-400/15 text-purple-400"}`}>{u.r}</span>
+          </GC>
+        ))}
       </div>
     </div>
   );
 
-  // ── Page Router ──
+  const SettPage = () => (
+    <div className="space-y-3 animate-[fadeIn_0.3s]">
+      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Settings</h1>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <GC className="p-4 space-y-3" hover={false}>
+          <h3 className="font-semibold text-sm text-white flex items-center gap-2" style={{ fontFamily: "'Outfit', sans-serif" }}><Shield size={14} /> Firebase</h3>
+          <div className={`flex items-center gap-3 p-3 rounded-xl border ${fbOk ? "bg-emerald-400/5 border-emerald-400/20" : "bg-rose-400/5 border-rose-400/20"}`}>
+            <div className={`w-3 h-3 rounded-full ${fbOk ? "bg-emerald-400 animate-pulse" : "bg-rose-400"}`} />
+            <div>
+              <p className={`text-sm font-medium ${fbOk ? "text-emerald-400" : "text-rose-400"}`}>{fbOk ? "Connected" : "Disconnected"}</p>
+              <p className="text-[10px] text-slate-500">property-manager · asia-southeast1</p>
+            </div>
+          </div>
+          <div className="text-xs text-slate-500 space-y-1">
+            <p>Properties: {props.length}</p>
+            <p>Notifications: {notifs.length}</p>
+            <p>Audit Logs: {audits.length}</p>
+          </div>
+        </GC>
+        <GC className="p-4 space-y-3" hover={false}>
+          <h3 className="font-semibold text-sm text-white flex items-center gap-2" style={{ fontFamily: "'Outfit', sans-serif" }}><Bell size={14} /> Notifications</h3>
+          {["Price changes", "Status updates", "New properties", "Reminders"].map((n) => (
+            <label key={n} className="flex items-center justify-between">
+              <span className="text-xs text-slate-400">{n}</span>
+              <div className="w-9 h-5 bg-cyan-400/30 rounded-full relative">
+                <div className="w-3.5 h-3.5 bg-cyan-400 rounded-full absolute top-[3px] right-[3px]" />
+              </div>
+            </label>
+          ))}
+        </GC>
+      </div>
+    </div>
+  );
+
+  // ═══════════════════════════════════════════════════════════
+  // PAGE ROUTER
+  // ═══════════════════════════════════════════════════════════
   const renderPage = () => {
-    switch (activePage) {
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center py-32">
+          <div className="text-center"><Spin size={28} /><p className="text-slate-500 text-sm mt-3">Connecting to Firebase...</p></div>
+        </div>
+      );
+    }
+    switch (page) {
       case "dashboard": return <Dashboard />;
-      case "properties": return <PropertiesPage />;
-      case "favorites": return <FavoritesPage />;
+      case "properties": return <PropsPage />;
+      case "favorites": return <FavsPage />;
       case "deals": return <DealsPage />;
       case "map": return <MapPage />;
-      case "documents": return <DocumentsPage />;
-      case "analytics": return <AnalyticsPage />;
-      case "users": return <UsersPage />;
+      case "documents": return <DocsPage />;
+      case "analytics": return <AnalPage />;
+      case "users": return <UsersPage2 />;
       case "audit": return <AuditPage />;
-      case "settings": return <SettingsPage />;
+      case "settings": return <SettPage />;
       default: return <Dashboard />;
     }
   };
 
+  // ═══════════════════════════════════════════════════════════
+  // RENDER
+  // ═══════════════════════════════════════════════════════════
+
+  // While waiting for Firebase to confirm auth state
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#0a0e1a] flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 size={28} className="animate-spin text-cyan-400 mx-auto mb-3" />
+          <p className="text-slate-500 text-sm">Connecting…</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Not logged in → show auth screen
+  if (!currentUser) {
+    return (
+      <AuthScreen
+        mode={authMode} setMode={setAuthMode}
+        form={authForm} setForm={setAuthForm}
+        onSubmit={handleAuth} error={authError} busy={authBusy}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0e1a] text-slate-100" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+      {/* eslint-disable-next-line @next/next/no-css-tags */}
+      <style jsx global>{`
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+        .line-clamp-2 { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+        select option { background: #111827; color: #e2e8f0; }
+      `}</style>
+
       {/* Ambient Background */}
-      <div className="fixed inset-0 pointer-events-none z-0">
-        <div className="absolute top-0 left-0 w-full h-full" style={{ background: "radial-gradient(ellipse at 20% 50%, rgba(0,240,255,0.06) 0%, transparent 50%), radial-gradient(ellipse at 80% 20%, rgba(168,85,247,0.04) 0%, transparent 50%), radial-gradient(ellipse at 50% 80%, rgba(52,211,153,0.03) 0%, transparent 50%)" }} />
-      </div>
+      <div className="fixed inset-0 pointer-events-none z-0" style={{
+        background: "radial-gradient(ellipse at 20% 50%, rgba(0,240,255,0.05) 0%, transparent 50%), radial-gradient(ellipse at 80% 20%, rgba(168,85,247,0.04) 0%, transparent 50%), radial-gradient(ellipse at 50% 80%, rgba(52,211,153,0.03) 0%, transparent 50%)"
+      }} />
 
-      {/* Sidebar */}
-      <Sidebar />
+      <SidebarComp />
 
-      {/* Main Content */}
-      <div className={`transition-all duration-300 ${sidebarCollapsed ? "ml-[72px]" : "ml-[260px]"}`}>
+      <div className="lg:ml-[260px]">
         <TopBar />
-        <main className="p-6 relative z-10">
+        <MobSrch />
+        <main className="p-3 sm:p-4 md:p-6 relative z-10">
           {renderPage()}
         </main>
       </div>
 
-      {/* Add/Edit Modal */}
-      {showAddModal && <PropertyModal />}
+      {showAdd && <PropModal />}
+      {showNotif && <div className="fixed inset-0 z-20" onClick={() => setShowNotif(false)} />}
 
-      {/* Click outside to close notifications */}
-      {showNotifications && <div className="fixed inset-0 z-20" onClick={() => setShowNotifications(false)} />}
-
-      {/* Google Fonts */}
-      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet" />
+      {/* Toast */}
+      {toast && (
+        <div className={`fixed bottom-4 right-4 z-[100] flex items-center gap-3 px-4 py-3 rounded-xl border
+          backdrop-blur-2xl shadow-2xl animate-[slideUp_0.3s]
+          ${toast.t === "success" ? "bg-emerald-500/15 border-emerald-400/30 text-emerald-300"
+          : toast.t === "error" ? "bg-rose-500/15 border-rose-400/30 text-rose-300"
+          : "bg-cyan-500/15 border-cyan-400/30 text-cyan-300"}`}>
+          {toast.t === "success" ? <CheckCircle size={16} /> : <AlertCircle size={16} />}
+          <span className="text-sm font-medium">{toast.m}</span>
+          <button onClick={() => setToast(null)} className="ml-2 opacity-60 hover:opacity-100"><X size={14} /></button>
+        </div>
+      )}
     </div>
   );
 }
