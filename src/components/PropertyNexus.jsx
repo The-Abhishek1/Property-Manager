@@ -120,11 +120,7 @@ const TAGS = [
   "industrial", "commercial",
 ];
 
-const SALES = [
-  { month: "Oct", sales: 2, value: 12 }, { month: "Nov", sales: 3, value: 18 },
-  { month: "Dec", sales: 1, value: 8 }, { month: "Jan", sales: 4, value: 25 },
-  { month: "Feb", sales: 2, value: 15 }, { month: "Mar", sales: 3, value: 22 },
-];
+// SALES is now computed dynamically from real props in the Dashboard component
 
 // ═══════════════════════════════════════════════════════════
 // GLASS UI COMPONENTS
@@ -198,8 +194,16 @@ const TI = ({ type, size = 16 }) => {
 const Spin = ({ size = 20 }) => <Loader2 size={size} className="animate-spin text-cyan-400" />;
 
 // ═══════════════════════════════════════════════════════════
-// MAIN APPLICATION
+// ROLE CONFIG — add emails that should have full admin access.
+// All other authenticated users are read-only "viewers".
 // ═══════════════════════════════════════════════════════════
+const ADMIN_EMAILS = [
+  "admin@propertynexus.com",
+  // add more admin emails here, e.g. "owner@yourdomain.com"
+];
+
+const getUserRole = (email) =>
+  email && ADMIN_EMAILS.includes(email.toLowerCase()) ? "admin" : "viewer";
 // ═══════════════════════════════════════════════════════════
 // ADD / EDIT MODAL  — top-level component so React never
 // unmounts it mid-upload when parent state changes
@@ -682,6 +686,15 @@ const AuthScreen = ({ mode, setMode, form, setForm, onSubmit, error, busy }) => 
             onKeyDown={(e) => e.key === "Enter" && onSubmit()}
             className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all" />
         </div>
+        {mode === "signup" && (
+          <div className="flex items-start gap-2 px-3 py-2.5 bg-cyan-500/[0.07] border border-cyan-400/20 rounded-xl">
+            <Shield size={13} className="text-cyan-400 flex-shrink-0 mt-0.5" />
+            <p className="text-[10px] text-slate-400 leading-relaxed">
+              New accounts are <span className="text-slate-300 font-medium">viewer</span> by default — read-only access.
+              Admin access is granted by the property manager.
+            </p>
+          </div>
+        )}
         {error && (
           <div className="flex items-center gap-2 px-3 py-2.5 bg-rose-500/10 border border-rose-400/20 rounded-xl">
             <AlertCircle size={14} className="text-rose-400 flex-shrink-0" />
@@ -708,11 +721,15 @@ const AuthScreen = ({ mode, setMode, form, setForm, onSubmit, error, busy }) => 
 export default function PropertyNexus() {
   // ─── Auth state ───
   const [currentUser, setCurrentUser] = useState(null);  // Firebase Auth user object
-  const [authLoading, setAuthLoading] = useState(true);   // waiting for onAuthStateChanged
-  const [authMode, setAuthMode] = useState("login");      // "login" | "signup"
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState("login");
   const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+
+  // Derived role — admin emails defined in ADMIN_EMAILS above; everyone else is viewer
+  const userRole = getUserRole(currentUser?.email);
+  const isAdmin = userRole === "admin";
 
   // ─── App state ───
   const [props, setProps] = useState([]);
@@ -758,6 +775,15 @@ export default function PropertyNexus() {
         if (authForm.name.trim()) {
           await updateProfile(cred.user, { displayName: authForm.name.trim() });
         }
+        // Write user record immediately on signup so Users page shows them right away
+        const role = getUserRole(authForm.email);
+        await fbUpdate(`users/${cred.user.uid}`, {
+          uid: cred.user.uid,
+          displayName: authForm.name.trim() || "",
+          email: authForm.email,
+          role,
+          lastSeen: new Date().toISOString(),
+        });
       }
     } catch (err) {
       const msgs = {
@@ -767,6 +793,7 @@ export default function PropertyNexus() {
         "auth/weak-password": "Password must be at least 6 characters.",
         "auth/invalid-email": "Please enter a valid email address.",
         "auth/invalid-credential": "Incorrect email or password.",
+        "auth/too-many-requests": "Too many attempts. Please try again later.",
       };
       setAuthError(msgs[err.code] || err.message);
     }
@@ -784,6 +811,16 @@ export default function PropertyNexus() {
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setAuthLoading(false);
+      // Upsert user record into RTDB so the Users page shows real signed-in users
+      if (user) {
+        fbUpdate(`users/${user.uid}`, {
+          uid: user.uid,
+          displayName: user.displayName || "",
+          email: user.email || "",
+          role: getUserRole(user.email),
+          lastSeen: new Date().toISOString(),
+        }).catch(() => {});
+      }
     });
     return () => unsubAuth();
   }, []);
@@ -852,11 +889,13 @@ export default function PropertyNexus() {
 
   // ─── CRUD handlers ───
   const togFav = async (id) => {
+    if (!isAdmin) { showT("Viewers cannot modify properties", "error"); return; }
     const p = props.find((x) => x.id === id);
     if (p) await fbUpdate(`properties/${id}`, { isFavorite: !p.isFavorite });
   };
 
   const delProp = async (id) => {
+    if (!isAdmin) { showT("Only admins can delete properties", "error"); return; }
     const p = props.find((x) => x.id === id);
     if (!confirm(`Delete "${p?.title}"? This cannot be undone.`)) return;
     setSaving(true);
@@ -873,6 +912,7 @@ export default function PropertyNexus() {
   };
 
   const updStatus = async (id, s) => {
+    if (!isAdmin) { showT("Only admins can change status", "error"); return; }
     const p = props.find((x) => x.id === id);
     setSaving(true);
     try {
@@ -886,6 +926,7 @@ export default function PropertyNexus() {
   };
 
   const saveProp = async (data) => {
+    if (!isAdmin) { showT("Only admins can save properties", "error"); return; }
     setSaving(true);
     try {
       if (editProp) {
@@ -1008,6 +1049,7 @@ export default function PropertyNexus() {
       </div>
 
       <div className="flex items-center gap-2 sm:gap-3">
+        {isAdmin && (
         <button
           onClick={() => { setShowAdd(true); setEditProp(null); }}
           className="flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500
@@ -1017,6 +1059,7 @@ export default function PropertyNexus() {
           <Plus size={15} />
           <span className="hidden sm:inline">Add Property</span>
         </button>
+        )}
 
         {/* Notifications */}
         <div className="relative">
@@ -1093,6 +1136,10 @@ export default function PropertyNexus() {
                 <div className="px-3 py-2.5 border-b border-white/[0.06]">
                   <p className="text-xs font-medium text-white truncate">{currentUser?.displayName || "User"}</p>
                   <p className="text-[10px] text-slate-500 truncate">{currentUser?.email}</p>
+                  <span className={`inline-block mt-1 px-2 py-0.5 rounded-md text-[9px] font-semibold uppercase
+                    ${isAdmin ? "bg-cyan-400/15 text-cyan-400" : "bg-slate-400/15 text-slate-400"}`}>
+                    {userRole}
+                  </span>
                 </div>
                 <button
                   onClick={() => { setShowUserMenu(false); handleSignOut(); }}
@@ -1126,7 +1173,30 @@ export default function PropertyNexus() {
   // ═══════════════════════════════════════════════════════════
   // DASHBOARD
   // ═══════════════════════════════════════════════════════════
-  const Dashboard = () => (
+  const Dashboard = () => {
+    // Compute sales trend from real data — last 6 months
+    const salesTrend = useMemo(() => {
+      const now = new Date();
+      return Array.from({ length: 6 }, (_, i) => {
+        const d = new Date(now.getFullYear(), now.getMonth() - 5 + i, 1);
+        const month = d.toLocaleString("default", { month: "short" });
+        const yr = d.getFullYear();
+        const mo = d.getMonth();
+        const sold = props.filter((p) => {
+          if (!p.soldDate && p.status !== "sold") return false;
+          const sd = new Date(p.soldDate || p.updatedAt || "");
+          return sd.getFullYear() === yr && sd.getMonth() === mo;
+        });
+        const added = props.filter((p) => {
+          const cd = new Date(p.createdAt || "");
+          return cd.getFullYear() === yr && cd.getMonth() === mo;
+        });
+        const value = sold.reduce((s, p) => s + (+(p.finalSellingPrice || p.price) || 0), 0) / 1e5; // in Lakhs
+        return { month, sales: sold.length, added: added.length, value: Math.round(value * 10) / 10 };
+      });
+    }, [props]);
+
+    return (
     <div className="space-y-4 sm:space-y-6 animate-[fadeIn_0.3s]">
       <div>
         <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Dashboard</h1>
@@ -1161,9 +1231,9 @@ export default function PropertyNexus() {
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4">
         <GC className="p-4 sm:p-5 lg:col-span-2" hover={false}>
-          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Sales Trend</h3>
+          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Sales Trend <span className="text-[10px] font-normal text-slate-500 ml-2">last 6 months · ₹L sold</span></h3>
           <ResponsiveContainer width="100%" height={180}>
-            <AreaChart data={SALES}>
+            <AreaChart data={salesTrend}>
               <defs>
                 <linearGradient id="cv" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#00f0ff" stopOpacity={0.3} />
@@ -1258,7 +1328,8 @@ export default function PropertyNexus() {
         </GC>
       </div>
     </div>
-  );
+    );
+  };
 
   // ═══════════════════════════════════════════════════════════
   // PROPERTY CARD
@@ -1308,12 +1379,14 @@ export default function PropertyNexus() {
         </div>
         <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/[0.06]">
           <div className="flex items-center gap-1 text-[10px] text-slate-500"><Eye size={10} />{p.views || 0}</div>
+          {isAdmin && (
           <div className="flex gap-0.5">
             <button onClick={(e) => { e.stopPropagation(); setEditProp(p); setShowAdd(true); }}
               className="p-1 sm:p-1.5 rounded-lg hover:bg-white/[0.08] text-slate-500 hover:text-white transition-all"><Edit size={12} /></button>
             <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
               className="p-1 sm:p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-500 hover:text-rose-400 transition-all"><Trash2 size={12} /></button>
           </div>
+          )}
         </div>
       </div>
     </GC>
@@ -1460,6 +1533,7 @@ export default function PropertyNexus() {
 
               <GC className="p-4" hover={false}>
                 <h3 className="font-semibold text-white text-sm mb-2" style={{ fontFamily: "'Outfit', sans-serif" }}>Change Status</h3>
+                {isAdmin ? (
                 <div className="flex gap-1.5 flex-wrap">
                   {["available", "on-hold", "sold", "draft"].map((s) => (
                     <button key={s} onClick={() => updStatus(p.id, s)} disabled={saving}
@@ -1469,6 +1543,9 @@ export default function PropertyNexus() {
                     </button>
                   ))}
                 </div>
+                ) : (
+                  <p className="text-xs text-slate-600">Admin access required to change status</p>
+                )}
               </GC>
 
               {lp.negotiationNotes && (
@@ -1485,6 +1562,7 @@ export default function PropertyNexus() {
         {tab === "notes" && (
           <GC className="p-4 space-y-3" hover={false}>
             <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Internal Notes</h3>
+            {isAdmin && (
             <div className="flex gap-2">
               <GI placeholder="Add a note..." value={nNote} onChange={(e) => setNNote(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addNote()} />
               <button onClick={addNote} disabled={sv}
@@ -1492,6 +1570,7 @@ export default function PropertyNexus() {
                 {sv ? <Spin size={14} /> : "Add"}
               </button>
             </div>
+            )}
             <div className="space-y-2">
               {(lp.notes || []).length === 0 && <p className="text-xs text-slate-600 py-4 text-center">No notes yet</p>}
               {(lp.notes || []).map((n) => (
@@ -1510,6 +1589,7 @@ export default function PropertyNexus() {
         {tab === "buyers" && (
           <GC className="p-4 space-y-3" hover={false}>
             <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Interested Buyers</h3>
+            {isAdmin && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <GI placeholder="Name" value={nBuyer.name} onChange={(e) => setNBuyer({ ...nBuyer, name: e.target.value })} />
               <GI placeholder="Contact" value={nBuyer.contact} onChange={(e) => setNBuyer({ ...nBuyer, contact: e.target.value })} />
@@ -1521,6 +1601,7 @@ export default function PropertyNexus() {
                 </button>
               </div>
             </div>
+            )}
             <div className="space-y-2">
               {(lp.buyers || []).length === 0 && <p className="text-xs text-slate-600 py-4 text-center">No buyers yet</p>}
               {(lp.buyers || []).map((b) => (
@@ -1643,6 +1724,7 @@ export default function PropertyNexus() {
                     </div>
                   </div>
                   <p className="font-bold text-cyan-400 text-xs flex-shrink-0">{fmt(p.price)}</p>
+                  {isAdmin && (
                   <div className="hidden sm:flex gap-0.5 opacity-0 group-hover:opacity-100">
                     <button onClick={(e) => { e.stopPropagation(); togFav(p.id); }}
                       className={`p-1.5 rounded-lg ${p.isFavorite ? "text-rose-400" : "text-slate-500"}`}>
@@ -1652,6 +1734,7 @@ export default function PropertyNexus() {
                     <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
                       className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400"><Trash2 size={13} /></button>
                   </div>
+                  )}
                 </GC>
               ))}
             </div>
@@ -1746,23 +1829,47 @@ export default function PropertyNexus() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-3" style={{ height: "calc(100vh - 220px)", minHeight: "500px" }}>
-          {/* Real OpenStreetMap embed */}
+          {/* Leaflet map with one marker per property */}
           <div className="lg:col-span-2 rounded-2xl overflow-hidden border border-white/[0.08] relative">
-            <iframe
-              title="Property Map"
-              className="w-full h-full"
-              style={{ minHeight: "400px", filter: "hue-rotate(180deg) invert(90%) brightness(0.85) contrast(1.1)" }}
-              src={`https://www.openstreetmap.org/export/embed.html?bbox=${(+centerLng-0.15)},${(+centerLat-0.12)},${(+centerLng+0.15)},${(+centerLat+0.12)}&layer=mapnik&marker=${centerLat},${centerLng}`}
-            />
-            {/* Overlay property dots on top of iframe using absolute positioning */}
-            <div className="absolute inset-0 pointer-events-none">
-              {/* Legend */}
-              <div className="absolute bottom-3 left-3 bg-[#111827]/90 border border-white/10 rounded-xl p-2.5 space-y-1 pointer-events-auto">
-                {[{ l: "Available", c: "bg-emerald-400" }, { l: "On Hold", c: "bg-amber-400" }, { l: "Sold", c: "bg-rose-400" }, { l: "Draft", c: "bg-slate-400" }].map((i) => (
-                  <div key={i.l} className="flex items-center gap-2 text-[10px] text-slate-400"><div className={`w-2 h-2 rounded-full ${i.c}`} />{i.l}</div>
-                ))}
+            {mappable.length === 0 ? (
+              <div className="w-full h-full min-h-[400px] flex items-center justify-center bg-white/[0.02]">
+                <div className="text-center">
+                  <MapPin size={32} className="mx-auto text-slate-700 mb-3" />
+                  <p className="text-slate-500 text-sm">No properties with coordinates yet</p>
+                  <p className="text-slate-600 text-xs mt-1">Add lat/lng when creating a property</p>
+                </div>
               </div>
-            </div>
+            ) : (
+              <iframe
+                title="Property Map"
+                className="w-full h-full"
+                style={{ minHeight: "400px", border: "none" }}
+                srcDoc={`<!DOCTYPE html><html><head>
+<meta charset="utf-8"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
+<style>html,body,#map{margin:0;padding:0;width:100%;height:100%;background:#0a0e1a;}
+.leaflet-popup-content-wrapper{background:#111827;color:#e2e8f0;border:1px solid rgba(255,255,255,0.1);border-radius:12px;}
+.leaflet-popup-tip{background:#111827;}
+.leaflet-popup-content{font-family:'DM Sans',sans-serif;font-size:12px;}
+.leaflet-popup-content b{color:#00f0ff;}
+.leaflet-tile-pane{filter:hue-rotate(180deg) invert(90%) brightness(0.78) contrast(1.12);}
+</style>
+</head><body><div id="map"></div>
+<script>
+var map = L.map('map',{zoomControl:true}).setView([${centerLat},${centerLng}],11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OSM'}).addTo(map);
+var colors={available:'#34d399','on-hold':'#fbbf24',sold:'#fb7185',draft:'#94a3b8'};
+${mappable.map((p) => {
+  const color = { available: "#34d399", "on-hold": "#fbbf24", sold: "#fb7185", draft: "#94a3b8" }[p.status] || "#94a3b8";
+  const title = (p.title || "").replace(/'/g, "\\'").replace(/"/g, "&quot;");
+  const area  = (p.area  || "").replace(/'/g, "\\'");
+  const price = p.price >= 1e7 ? `₹${(p.price/1e7).toFixed(2)} Cr` : p.price >= 1e5 ? `₹${(p.price/1e5).toFixed(2)} L` : `₹${p.price}`;
+  return `L.circleMarker([${+p.lat},${+p.lng}],{radius:9,fillColor:'${color}',color:'${color}',weight:2,opacity:1,fillOpacity:0.85}).addTo(map).bindPopup('<b>${title}</b><br/>${area}<br/>${price}<br/><span style="text-transform:capitalize;color:${color}">${p.status}</span>');`;
+}).join("\n")}
+<\/script></body></html>`}
+              />
+            )}
           </div>
 
           {/* Sidebar: list of all mappable properties */}
@@ -1939,23 +2046,94 @@ export default function PropertyNexus() {
     </div>
   );
 
-  const UsersPage2 = () => (
-    <div className="space-y-3 animate-[fadeIn_0.3s]">
-      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Users</h1>
-      <div className="space-y-2">
-        {[
-          { n: "Admin", e: "admin@propertynexus.com", r: "admin", g: "from-cyan-500 to-blue-500" },
-          { n: "Agent", e: "agent@propertynexus.com", r: "agent", g: "from-purple-500 to-rose-500" },
-        ].map((u, i) => (
-          <GC key={i} className="p-3 flex items-center gap-3" hover={false}>
-            <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-sm bg-gradient-to-br ${u.g} flex-shrink-0`}>{u.n[0]}</div>
-            <div className="flex-1 min-w-0"><p className="text-xs font-medium text-white">{u.n}</p><p className="text-[10px] text-slate-500 truncate">{u.e}</p></div>
-            <span className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold uppercase ${u.r === "admin" ? "bg-cyan-400/15 text-cyan-400" : "bg-purple-400/15 text-purple-400"}`}>{u.r}</span>
+  const UsersPage2 = () => {
+    const [fbUsers, setFbUsers] = useState([]);
+    useEffect(() => {
+      const unsub = fbSub("users", (data) => {
+        // Sort: admins first, then by lastSeen desc
+        data.sort((a, b) => {
+          if (a.role === "admin" && b.role !== "admin") return -1;
+          if (b.role === "admin" && a.role !== "admin") return 1;
+          return (b.lastSeen || "").localeCompare(a.lastSeen || "");
+        });
+        setFbUsers(data);
+      });
+      return () => unsub();
+    }, []);
+
+    const gradients = [
+      "from-cyan-500 to-blue-500", "from-purple-500 to-rose-500",
+      "from-emerald-500 to-teal-500", "from-amber-500 to-orange-500",
+      "from-pink-500 to-fuchsia-500", "from-indigo-500 to-purple-500",
+    ];
+
+    return (
+      <div className="space-y-3 animate-[fadeIn_0.3s]">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Users</h1>
+          <p className="text-slate-500 text-xs mt-0.5">{fbUsers.length} registered user{fbUsers.length !== 1 ? "s" : ""} · admins can edit properties</p>
+        </div>
+
+        {/* Role legend */}
+        <GC className="p-3 flex flex-wrap gap-3" hover={false}>
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-cyan-400/15 text-cyan-400">admin</span>
+            Full access — add, edit, delete, change status
+          </div>
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-400/15 text-slate-400">viewer</span>
+            Read-only — browse and search only
+          </div>
+        </GC>
+
+        <div className="space-y-2">
+          {fbUsers.length === 0 && (
+            <GC className="p-10 text-center" hover={false}>
+              <Users size={28} className="mx-auto text-slate-700 mb-3" />
+              <p className="text-slate-500 text-sm">No users yet</p>
+              <p className="text-slate-600 text-xs mt-1">Users appear here after their first sign-in</p>
+            </GC>
+          )}
+          {fbUsers.map((u, i) => (
+            <GC key={u.uid || u.id} className="p-3 flex items-center gap-3" hover={false}>
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold text-sm
+                bg-gradient-to-br ${gradients[i % gradients.length]} flex-shrink-0`}>
+                {(u.displayName || u.email || "U")[0].toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <p className="text-xs font-semibold text-white">{u.displayName || <span className="text-slate-500 italic">No display name</span>}</p>
+                  {u.uid === currentUser?.uid && (
+                    <span className="text-[9px] text-slate-600 bg-white/[0.04] border border-white/[0.08] px-1.5 py-0.5 rounded-md">you</span>
+                  )}
+                </div>
+                <p className="text-[10px] text-slate-500 truncate">{u.email}</p>
+                {u.lastSeen && <p className="text-[9px] text-slate-700 mt-0.5">Last seen {ago(u.lastSeen)}</p>}
+              </div>
+              <span className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold uppercase flex-shrink-0
+                ${u.role === "admin" ? "bg-cyan-400/15 text-cyan-400 border border-cyan-400/20"
+                : "bg-slate-400/15 text-slate-400 border border-slate-400/20"}`}>
+                {u.role || "viewer"}
+              </span>
+            </GC>
+          ))}
+        </div>
+
+        {isAdmin && (
+          <GC className="p-4" hover={false}>
+            <h3 className="font-semibold text-xs text-white mb-2 flex items-center gap-2" style={{ fontFamily: "'Outfit', sans-serif" }}>
+              <Shield size={13} className="text-cyan-400" /> Promote to Admin
+            </h3>
+            <p className="text-[10px] text-slate-500 leading-relaxed">
+              To grant admin access, add the user's email to the <code className="bg-white/[0.08] px-1.5 py-0.5 rounded text-cyan-400">ADMIN_EMAILS</code> array
+              at the top of <code className="bg-white/[0.08] px-1.5 py-0.5 rounded text-cyan-400">PropertyNexus.jsx</code> and redeploy.
+              The role badge updates automatically on their next sign-in.
+            </p>
           </GC>
-        ))}
+        )}
       </div>
-    </div>
-  );
+    );
+  };
 
   const SettPage = () => (
     <div className="space-y-3 animate-[fadeIn_0.3s]">
