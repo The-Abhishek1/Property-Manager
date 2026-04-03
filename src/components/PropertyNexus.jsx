@@ -201,6 +201,367 @@ const Spin = ({ size = 20 }) => <Loader2 size={size} className="animate-spin tex
 // MAIN APPLICATION
 // ═══════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════
+// ADD / EDIT MODAL  — top-level component so React never
+// unmounts it mid-upload when parent state changes
+// ═══════════════════════════════════════════════════════════
+const PropModal = ({ editProp: ep, saving, showT, saveProp, onClose, currentUser }) => {
+  const fileInputRef = useRef(null);
+  const videoInputRef = useRef(null);
+
+  const [f, sF] = useState({
+    title: ep?.title || "", type: ep?.type || "plot", category: ep?.category || "residential",
+    description: ep?.description || "", price: ep?.price || "", previousPrice: ep?.previousPrice || "",
+    pricePerUnit: ep?.pricePerUnit || "", priceUnit: ep?.priceUnit || "sqft",
+    size: ep?.size || "", sizeUnit: ep?.sizeUnit || "sqft", status: ep?.status || "draft",
+    owner: ep?.owner || "", ownerContact: ep?.ownerContact || "",
+    country: ep?.country || "India", state: ep?.state || "Karnataka",
+    city: ep?.city || "Bangalore", area: ep?.area || "", pincode: ep?.pincode || "",
+    lat: ep?.lat || "", lng: ep?.lng || "", tags: ep?.tags || [],
+    facing: ep?.facing || "", nearHighway: ep?.nearHighway || false,
+    cornerSite: ep?.cornerSite || false, approved: ep?.approved || false,
+    negotiationNotes: ep?.negotiationNotes || "", images: ep?.images || [],
+    videoUrl: ep?.videoUrl || "", videoThumb: ep?.videoThumb || "",
+  });
+  const [sTags, sSTags] = useState(ep?.tags || []);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState("");
+  const [imgUrl, sImgUrl] = useState("");
+
+  const TAGS = [
+    "investment", "prime-location", "near-highway", "corner-site", "approved",
+    "luxury", "urgent-sale", "gated-community", "near-it-park", "high-roi",
+    "industrial", "commercial",
+  ];
+
+  const togT = (t) => sSTags((ts) => ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]);
+  const addImg = () => {
+    if (imgUrl.trim()) {
+      sF((prev) => ({ ...prev, images: [...(prev.images || []), imgUrl.trim()] }));
+      sImgUrl("");
+    }
+  };
+  const rmImg = (i) => sF((prev) => ({ ...prev, images: prev.images.filter((_, x) => x !== i) }));
+
+  const handleImageFiles = async (fileList) => {
+    const files = Array.from(fileList).filter(file => file.type.startsWith("image/"));
+    if (!files.length) return;
+    setUploading(true);
+    const propId = ep?.id || "new";
+    const uploaded = [];
+    for (let i = 0; i < files.length; i++) {
+      setUploadProgress(`Uploading image ${i + 1} of ${files.length}…`);
+      try {
+        const result = await uploadToCloudinary(files[i], propId);
+        uploaded.push(result.url);
+      } catch (err) {
+        showT(`Image ${i + 1} failed: ${err.message}`, "error");
+      }
+    }
+    if (uploaded.length) {
+      sF((prev) => ({ ...prev, images: [...(prev.images || []), ...uploaded] }));
+      showT(`${uploaded.length} image(s) uploaded`);
+    }
+    setUploadProgress("");
+    setUploading(false);
+  };
+
+  const handleVideoFile = async (file) => {
+    if (!file || !file.type.startsWith("video/")) { showT("Please select a video file", "error"); return; }
+    setUploading(true);
+    setUploadProgress("Uploading video… this may take a moment");
+    const propId = ep?.id || "new";
+    try {
+      const result = await uploadToCloudinary(file, propId);
+      sF((prev) => ({ ...prev, videoUrl: result.url, videoThumb: result.thumbnailUrl || "" }));
+      showT("Video uploaded");
+    } catch (err) {
+      showT("Video upload failed: " + err.message, "error");
+    }
+    setUploadProgress("");
+    setUploading(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const files = e.dataTransfer.files;
+    if (!files.length) return;
+    if (files[0].type.startsWith("video/")) handleVideoFile(files[0]);
+    else handleImageFiles(files);
+  };
+
+  const sub = () => {
+    if (!f.title || !f.price) { showT("Title & Price required", "error"); return; }
+    saveProp({
+      ...f, price: +f.price, previousPrice: f.previousPrice ? +f.previousPrice : null,
+      pricePerUnit: +f.pricePerUnit || 0, size: +f.size || 0,
+      lat: +f.lat || 0, lng: +f.lng || 0, tags: sTags,
+    });
+  };
+
+  const fmt = (n) => {
+    if (!n && n !== 0) return "₹0";
+    n = Number(n);
+    if (n >= 1e7) return `₹${(n / 1e7).toFixed(2)} Cr`;
+    if (n >= 1e5) return `₹${(n / 1e5).toFixed(2)} L`;
+    return `₹${n.toLocaleString("en-IN")}`;
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
+      onClick={onClose}>
+      <div className="w-full sm:max-w-2xl max-h-[92vh] sm:max-h-[85vh] bg-[#111827]/95 backdrop-blur-2xl
+        border border-white/10 rounded-t-2xl sm:rounded-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
+          <h2 className="font-bold text-base text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>
+            {ep ? "Edit Property" : "Add Property"}
+          </h2>
+          <button onClick={onClose} className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-400">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-4 overflow-y-auto max-h-[70vh] space-y-3">
+          {/* Basic Info */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Title *</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                placeholder="e.g. 2 Acre Farm Land" value={f.title} onChange={(e) => sF({ ...f, title: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Type</label>
+              <select className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 transition-all appearance-none"
+                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center"}}
+                value={f.type} onChange={(e) => sF({ ...f, type: e.target.value })}>
+                <option value="land">Land</option><option value="plot">Plot</option>
+                <option value="house">House</option><option value="commercial">Commercial</option>
+              </select></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Category</label>
+              <select className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 transition-all appearance-none"
+                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center"}}
+                value={f.category} onChange={(e) => sF({ ...f, category: e.target.value })}>
+                <option value="residential">Residential</option><option value="commercial">Commercial</option>
+                <option value="agricultural">Agricultural</option>
+              </select></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Status</label>
+              <select className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 transition-all appearance-none"
+                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center"}}
+                value={f.status} onChange={(e) => sF({ ...f, status: e.target.value })}>
+                <option value="draft">Draft</option><option value="available">Available</option>
+                <option value="on-hold">On Hold</option><option value="sold">Sold</option>
+              </select></div>
+          </div>
+
+          {/* Price */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Price ₹ *</label>
+              <input type="number" className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                placeholder="4500000" value={f.price} onChange={(e) => sF({ ...f, price: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Prev Price</label>
+              <input type="number" className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.previousPrice} onChange={(e) => sF({ ...f, previousPrice: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Price/Unit</label>
+              <input type="number" className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.pricePerUnit} onChange={(e) => sF({ ...f, pricePerUnit: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Unit</label>
+              <select className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 transition-all appearance-none"
+                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center"}}
+                value={f.priceUnit} onChange={(e) => sF({ ...f, priceUnit: e.target.value })}>
+                <option value="sqft">sqft</option><option value="acre">acre</option><option value="gunta">gunta</option>
+              </select></div>
+          </div>
+
+          {/* Size + Facing */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Size</label>
+              <input type="number" className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.size} onChange={(e) => sF({ ...f, size: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Size Unit</label>
+              <select className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 transition-all appearance-none"
+                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center"}}
+                value={f.sizeUnit} onChange={(e) => sF({ ...f, sizeUnit: e.target.value })}>
+                <option value="sqft">sqft</option><option value="acres">acres</option><option value="guntas">guntas</option>
+              </select></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Facing</label>
+              <select className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm focus:outline-none focus:border-cyan-400/50 transition-all appearance-none"
+                style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 12px center"}}
+                value={f.facing} onChange={(e) => sF({ ...f, facing: e.target.value })}>
+                <option value="">-</option><option value="east">East</option><option value="west">West</option>
+                <option value="north">North</option><option value="south">South</option>
+              </select></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Pincode</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.pincode} onChange={(e) => sF({ ...f, pincode: e.target.value })} /></div>
+          </div>
+
+          {/* Description */}
+          <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Description</label>
+            <textarea rows={2} className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-3 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all resize-none"
+              placeholder="Describe the property..." value={f.description} onChange={(e) => sF({ ...f, description: e.target.value })} /></div>
+
+          {/* Location */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Area</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                placeholder="Devanahalli" value={f.area} onChange={(e) => sF({ ...f, area: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">City</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.city} onChange={(e) => sF({ ...f, city: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">State</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.state} onChange={(e) => sF({ ...f, state: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Owner</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.owner} onChange={(e) => sF({ ...f, owner: e.target.value })} /></div>
+          </div>
+
+          {/* Lat/Lng / Contact */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Latitude</label>
+              <input type="number" step="any" className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.lat} onChange={(e) => sF({ ...f, lat: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Longitude</label>
+              <input type="number" step="any" className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.lng} onChange={(e) => sF({ ...f, lng: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Contact</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.ownerContact} onChange={(e) => sF({ ...f, ownerContact: e.target.value })} /></div>
+            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Country</label>
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                value={f.country} onChange={(e) => sF({ ...f, country: e.target.value })} /></div>
+          </div>
+
+          {/* Images */}
+          <div>
+            <label className="text-[10px] text-slate-500 uppercase block mb-1">Images</label>
+            <div
+              onDrop={handleDrop}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+              onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
+              className="border-2 border-dashed border-white/10 rounded-xl p-4 text-center hover:border-cyan-400/30 transition-colors cursor-pointer"
+              onClick={(e) => { e.stopPropagation(); if (!uploading) fileInputRef.current?.click(); }}
+            >
+              {uploading && uploadProgress.includes("image") ? (
+                <div className="flex items-center justify-center gap-2 text-cyan-400">
+                  <Loader2 size={14} className="animate-spin" /><span className="text-xs">{uploadProgress}</span>
+                </div>
+              ) : (
+                <>
+                  <Upload size={18} className="mx-auto text-slate-500 mb-1" />
+                  <p className="text-xs text-slate-400">Click or drag & drop images</p>
+                  <p className="text-[10px] text-slate-600 mt-0.5">JPG, PNG, WEBP · multiple supported</p>
+                </>
+              )}
+              <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden"
+                onChange={(e) => handleImageFiles(e.target.files)} />
+            </div>
+            <div className="flex gap-2 mt-2">
+              <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all"
+                placeholder="Or paste image URL…" value={imgUrl} onChange={(e) => sImgUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addImg()} />
+              <button onClick={addImg} className="px-3 py-2 bg-white/[0.08] border border-white/[0.1] rounded-xl text-xs text-slate-300 flex-shrink-0">
+                <ImageIcon size={14} />
+              </button>
+            </div>
+            {/* FIX 2: Show uploaded images as <img> tags not background-image so they actually render */}
+            {f.images?.length > 0 && (
+              <div className="flex gap-2 mt-2 flex-wrap">
+                {f.images.map((img, i) => (
+                  <div key={i} className="relative group w-16 h-12 rounded-lg overflow-hidden border border-white/10 flex-shrink-0">
+                    <img src={img} alt="" className="w-full h-full object-cover" onError={(e) => { e.target.style.display='none'; }} />
+                    <button onClick={() => rmImg(i)}
+                      className="absolute inset-0 bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                      <X size={10} className="text-white" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Video */}
+          <div>
+            <label className="text-[10px] text-slate-500 uppercase block mb-1">Video</label>
+            <div
+              className="border-2 border-dashed border-white/10 rounded-xl p-3 flex items-center gap-3 hover:border-purple-400/30 transition-colors cursor-pointer"
+              onClick={(e) => { e.stopPropagation(); if (!uploading) videoInputRef.current?.click(); }}
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); const f0 = e.dataTransfer.files[0]; if (f0?.type.startsWith("video/")) handleVideoFile(f0); }}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            >
+              {uploading && uploadProgress.includes("video") ? (
+                <div className="flex items-center gap-2 text-purple-400 w-full justify-center">
+                  <Loader2 size={14} className="animate-spin" /><span className="text-xs">{uploadProgress}</span>
+                </div>
+              ) : f.videoUrl ? (
+                <div className="flex items-center gap-2 w-full">
+                  {f.videoThumb
+                    ? <img src={f.videoThumb} alt="" className="w-12 h-8 rounded object-cover flex-shrink-0" onError={(e) => { e.target.style.display='none'; }} />
+                    : <div className="w-12 h-8 rounded bg-purple-400/10 flex items-center justify-center flex-shrink-0"><Upload size={12} className="text-purple-400" /></div>
+                  }
+                  <p className="text-[10px] text-emerald-400 truncate flex-1">✓ Video ready</p>
+                  <button onClick={(e) => { e.stopPropagation(); sF((prev) => ({ ...prev, videoUrl: "", videoThumb: "" })); }}
+                    className="text-slate-500 hover:text-rose-400"><X size={13} /></button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 w-full justify-center">
+                  <Upload size={14} className="text-slate-500" />
+                  <span className="text-xs text-slate-400">Upload video (MP4, MOV) or drag & drop</span>
+                </div>
+              )}
+              <input ref={videoInputRef} type="file" accept="video/*" className="hidden"
+                onChange={(e) => handleVideoFile(e.target.files?.[0])} />
+            </div>
+            <input className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-2.5 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all mt-2"
+              placeholder="Or paste YouTube / video URL"
+              value={f.videoUrl && !f.videoUrl.includes("cloudinary") ? f.videoUrl : ""}
+              onChange={(e) => sF((prev) => ({ ...prev, videoUrl: e.target.value, videoThumb: "" }))} />
+          </div>
+
+          {/* Toggles */}
+          <div className="flex gap-4 flex-wrap">
+            {[{ k: "nearHighway", l: "Near Highway" }, { k: "cornerSite", l: "Corner Site" }, { k: "approved", l: "Approved" }].map((c) => (
+              <label key={c.k} className="flex items-center gap-2 cursor-pointer text-xs text-slate-400">
+                <input type="checkbox" checked={f[c.k]} onChange={(e) => sF({ ...f, [c.k]: e.target.checked })}
+                  className="w-4 h-4 rounded accent-cyan-400" />{c.l}
+              </label>
+            ))}
+          </div>
+
+          {/* Tags */}
+          <div>
+            <label className="text-[10px] text-slate-500 uppercase block mb-1">Tags</label>
+            <div className="flex flex-wrap gap-1.5">
+              {TAGS.map((t) => (
+                <button key={t} onClick={() => togT(t)}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-medium border
+                    ${sTags.includes(t) ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06]"}`}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Negotiation Notes */}
+          <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Negotiation Notes</label>
+            <textarea rows={2} className="w-full bg-white/[0.06] border border-white/10 rounded-xl px-3 sm:px-4 py-3 text-slate-100 text-sm placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 transition-all resize-none"
+              placeholder="Private notes..." value={f.negotiationNotes} onChange={(e) => sF({ ...f, negotiationNotes: e.target.value })} /></div>
+        </div>
+
+        <div className="p-4 border-t border-white/[0.06] flex justify-end gap-2">
+          <button onClick={onClose}
+            className="px-3 py-2 rounded-xl text-xs text-slate-400 bg-white/[0.04] border border-white/[0.08]">Cancel</button>
+          <button onClick={sub} disabled={saving}
+            className="px-5 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold
+              disabled:opacity-50 flex items-center gap-2">
+            {saving ? <Loader2 size={14} className="animate-spin text-slate-900" /> : <Save size={14} />}
+            {ep ? "Save Changes" : "Add Property"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
 // DOCUMENT TAB — upload docs to Cloudinary, store refs in RTDB
 // ═══════════════════════════════════════════════════════════
 const DocTab = ({ property: p, showT }) => {
@@ -823,15 +1184,20 @@ export default function PropertyNexus() {
           <ResponsiveContainer width="100%" height={180}>
             <PieChart>
               <Pie
-                data={[
-                  { name: "Land", value: props.filter((p) => p.type === "land").length || 1 },
-                  { name: "Plot", value: props.filter((p) => p.type === "plot").length || 1 },
-                  { name: "House", value: props.filter((p) => p.type === "house").length || 1 },
-                  { name: "Comm", value: props.filter((p) => p.type === "commercial").length || 1 },
-                ]}
+                data={(() => {
+                  const counts = [
+                    { name: "Land", value: props.filter((p) => p.type === "land").length },
+                    { name: "Plot", value: props.filter((p) => p.type === "plot").length },
+                    { name: "House", value: props.filter((p) => p.type === "house").length },
+                    { name: "Comm", value: props.filter((p) => p.type === "commercial").length },
+                  ];
+                  // Only show slices with actual data; fallback to placeholder if all zero
+                  const total = counts.reduce((s, c) => s + c.value, 0);
+                  return total > 0 ? counts.filter((c) => c.value > 0) : [{ name: "No data", value: 1 }];
+                })()}
                 cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={4} dataKey="value"
               >
-                {["#00f0ff", "#a855f7", "#34d399", "#fbbf24"].map((c, i) => <Cell key={i} fill={c} />)}
+                {["#00f0ff", "#a855f7", "#34d399", "#fbbf24", "#64748b"].map((c, i) => <Cell key={i} fill={c} />)}
               </Pie>
               <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} />
             </PieChart>
@@ -1179,333 +1545,10 @@ export default function PropertyNexus() {
     );
   };
 
-  // ═══════════════════════════════════════════════════════════
-  // ADD / EDIT MODAL
-  // ═══════════════════════════════════════════════════════════
-  const PropModal = () => {
-    const ep = editProp;
-    const fileInputRef = useRef(null);
-    const videoInputRef = useRef(null);
-    const [f, sF] = useState({
-      title: ep?.title || "", type: ep?.type || "plot", category: ep?.category || "residential",
-      description: ep?.description || "", price: ep?.price || "", previousPrice: ep?.previousPrice || "",
-      pricePerUnit: ep?.pricePerUnit || "", priceUnit: ep?.priceUnit || "sqft",
-      size: ep?.size || "", sizeUnit: ep?.sizeUnit || "sqft", status: ep?.status || "draft",
-      owner: ep?.owner || "", ownerContact: ep?.ownerContact || "",
-      country: ep?.country || "India", state: ep?.state || "Karnataka",
-      city: ep?.city || "Bangalore", area: ep?.area || "", pincode: ep?.pincode || "",
-      lat: ep?.lat || "", lng: ep?.lng || "", tags: ep?.tags || [],
-      facing: ep?.facing || "", nearHighway: ep?.nearHighway || false,
-      cornerSite: ep?.cornerSite || false, approved: ep?.approved || false,
-      negotiationNotes: ep?.negotiationNotes || "", images: ep?.images || [],
-      videoUrl: ep?.videoUrl || "", videoThumb: ep?.videoThumb || "",
-    });
-    const [sTags, sSTags] = useState(f.tags || []);
-    const [uploading, setUploading] = useState(false);
-    const [uploadProgress, setUploadProgress] = useState(""); // status message
-    const [imgUrl, sImgUrl] = useState("");  // for manual URL paste
 
-    const togT = (t) => sSTags((ts) => ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]);
-    const addImg = () => { if (imgUrl.trim()) { sF((prev) => ({ ...prev, images: [...(prev.images || []), imgUrl.trim()] })); sImgUrl(""); } };
-    const rmImg = (i) => sF((prev) => ({ ...prev, images: prev.images.filter((_, x) => x !== i) }));
+  // PropModal rendered as top-level component (see above main fn) to prevent remount on parent re-render
 
-    // ─── Upload images from file picker → Cloudinary via /api/upload ───
-    const handleImageFiles = async (fileList) => {
-      const files = Array.from(fileList).filter(f => f.type.startsWith("image/"));
-      if (!files.length) return;
-      setUploading(true);
-      const propId = ep?.id || "new";
-      const uploaded = [];
-      for (let i = 0; i < files.length; i++) {
-        setUploadProgress(`Uploading image ${i + 1} of ${files.length}…`);
-        try {
-          const result = await uploadToCloudinary(files[i], propId);
-          uploaded.push(result.url);
-        } catch (err) {
-          showT(`Image ${i + 1} failed: ${err.message}`, "error");
-        }
-      }
-      if (uploaded.length) {
-        sF((prev) => ({ ...prev, images: [...(prev.images || []), ...uploaded] }));
-        showT(`${uploaded.length} image(s) uploaded`);
-      }
-      setUploadProgress("");
-      setUploading(false);
-    };
-
-    // ─── Upload video from file picker → Cloudinary via /api/upload ───
-    const handleVideoFile = async (file) => {
-      if (!file || !file.type.startsWith("video/")) { showT("Please select a video file", "error"); return; }
-      setUploading(true);
-      setUploadProgress("Uploading video… this may take a moment");
-      const propId = ep?.id || "new";
-      try {
-        const result = await uploadToCloudinary(file, propId);
-        sF((prev) => ({ ...prev, videoUrl: result.url, videoThumb: result.thumbnailUrl || "" }));
-        showT("Video uploaded");
-      } catch (err) {
-        showT("Video upload failed: " + err.message, "error");
-      }
-      setUploadProgress("");
-      setUploading(false);
-    };
-
-    // ─── Drag-and-drop handler ───
-    const handleDrop = (e) => {
-      e.preventDefault();
-      const files = e.dataTransfer.files;
-      if (!files.length) return;
-      const first = files[0];
-      if (first.type.startsWith("video/")) handleVideoFile(first);
-      else handleImageFiles(files);
-    };
-
-    const sub = () => {
-      if (!f.title || !f.price) { showT("Title & Price required", "error"); return; }
-      saveProp({
-        ...f, price: +f.price, previousPrice: f.previousPrice ? +f.previousPrice : null,
-        pricePerUnit: +f.pricePerUnit || 0, size: +f.size || 0,
-        lat: +f.lat || 0, lng: +f.lng || 0, tags: sTags,
-      });
-    };
-
-    return (
-      <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm"
-        onClick={() => { setShowAdd(false); setEditProp(null); }}>
-        <div className="w-full sm:max-w-2xl max-h-[92vh] sm:max-h-[85vh] bg-[#111827]/95 backdrop-blur-2xl
-          border border-white/10 rounded-t-2xl sm:rounded-2xl overflow-hidden"
-          onClick={(e) => e.stopPropagation()}>
-          <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
-            <h2 className="font-bold text-base text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>
-              {ep ? "Edit Property" : "Add Property"}
-            </h2>
-            <button onClick={() => { setShowAdd(false); setEditProp(null); }} className="p-2 rounded-lg hover:bg-white/[0.08] text-slate-400">
-              <X size={18} />
-            </button>
-          </div>
-
-          <div className="p-4 overflow-y-auto max-h-[70vh] space-y-3">
-            {/* Basic Info */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Title *</label>
-                <GI placeholder="e.g. 2 Acre Farm Land" value={f.title} onChange={(e) => sF({ ...f, title: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Type</label>
-                <GS value={f.type} onChange={(e) => sF({ ...f, type: e.target.value })}>
-                  <option value="land">Land</option><option value="plot">Plot</option>
-                  <option value="house">House</option><option value="commercial">Commercial</option>
-                </GS></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Category</label>
-                <GS value={f.category} onChange={(e) => sF({ ...f, category: e.target.value })}>
-                  <option value="residential">Residential</option><option value="commercial">Commercial</option>
-                  <option value="agricultural">Agricultural</option>
-                </GS></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Status</label>
-                <GS value={f.status} onChange={(e) => sF({ ...f, status: e.target.value })}>
-                  <option value="draft">Draft</option><option value="available">Available</option>
-                  <option value="on-hold">On Hold</option><option value="sold">Sold</option>
-                </GS></div>
-            </div>
-
-            {/* Price */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Price ₹ *</label>
-                <GI type="number" placeholder="4500000" value={f.price} onChange={(e) => sF({ ...f, price: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Prev Price</label>
-                <GI type="number" value={f.previousPrice} onChange={(e) => sF({ ...f, previousPrice: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Price/Unit</label>
-                <GI type="number" value={f.pricePerUnit} onChange={(e) => sF({ ...f, pricePerUnit: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Unit</label>
-                <GS value={f.priceUnit} onChange={(e) => sF({ ...f, priceUnit: e.target.value })}>
-                  <option value="sqft">sqft</option><option value="acre">acre</option><option value="gunta">gunta</option>
-                </GS></div>
-            </div>
-
-            {/* Size */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Size</label>
-                <GI type="number" value={f.size} onChange={(e) => sF({ ...f, size: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Size Unit</label>
-                <GS value={f.sizeUnit} onChange={(e) => sF({ ...f, sizeUnit: e.target.value })}>
-                  <option value="sqft">sqft</option><option value="acres">acres</option><option value="guntas">guntas</option>
-                </GS></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Facing</label>
-                <GS value={f.facing} onChange={(e) => sF({ ...f, facing: e.target.value })}>
-                  <option value="">-</option><option value="east">East</option><option value="west">West</option>
-                  <option value="north">North</option><option value="south">South</option>
-                </GS></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Video URL</label>
-                <GI placeholder="YouTube link" value={f.videoUrl} onChange={(e) => sF({ ...f, videoUrl: e.target.value })} /></div>
-            </div>
-
-            {/* Description */}
-            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Description</label>
-              <GT rows={2} placeholder="Describe the property..." value={f.description} onChange={(e) => sF({ ...f, description: e.target.value })} /></div>
-
-            {/* Location */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Area</label>
-                <GI placeholder="Devanahalli" value={f.area} onChange={(e) => sF({ ...f, area: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">City</label>
-                <GI value={f.city} onChange={(e) => sF({ ...f, city: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">State</label>
-                <GI value={f.state} onChange={(e) => sF({ ...f, state: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Pincode</label>
-                <GI value={f.pincode} onChange={(e) => sF({ ...f, pincode: e.target.value })} /></div>
-            </div>
-
-            {/* Lat/Lng + Owner */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Latitude</label>
-                <GI type="number" step="any" value={f.lat} onChange={(e) => sF({ ...f, lat: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Longitude</label>
-                <GI type="number" step="any" value={f.lng} onChange={(e) => sF({ ...f, lng: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Owner</label>
-                <GI value={f.owner} onChange={(e) => sF({ ...f, owner: e.target.value })} /></div>
-              <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Contact</label>
-                <GI value={f.ownerContact} onChange={(e) => sF({ ...f, ownerContact: e.target.value })} /></div>
-            </div>
-
-            {/* Images — file upload + URL paste */}
-            <div>
-              <label className="text-[10px] text-slate-500 uppercase block mb-1">Images</label>
-
-              {/* Drop zone */}
-              <div
-                onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleDrop(e); }}
-                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                className="border-2 border-dashed border-white/10 rounded-xl p-4 text-center hover:border-cyan-400/30 transition-colors cursor-pointer"
-                onClick={(e) => { e.stopPropagation(); if (!uploading) fileInputRef.current?.click(); }}
-              >
-                {uploading && uploadProgress.includes("image") ? (
-                  <div className="flex items-center justify-center gap-2 text-cyan-400">
-                    <Spin size={14} /><span className="text-xs">{uploadProgress}</span>
-                  </div>
-                ) : (
-                  <>
-                    <Upload size={18} className="mx-auto text-slate-500 mb-1" />
-                    <p className="text-xs text-slate-400">Click or drag & drop images</p>
-                    <p className="text-[10px] text-slate-600 mt-0.5">JPG, PNG, WEBP · multiple supported</p>
-                  </>
-                )}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="hidden"
-                  onChange={(e) => handleImageFiles(e.target.files)}
-                />
-              </div>
-
-              {/* URL paste fallback */}
-              <div className="flex gap-2 mt-2">
-                <GI placeholder="Or paste image URL…" value={imgUrl} onChange={(e) => sImgUrl(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addImg()} />
-                <button onClick={addImg} className="px-3 py-2 bg-white/[0.08] border border-white/[0.1] rounded-xl text-xs text-slate-300 flex-shrink-0">
-                  <ImageIcon size={14} />
-                </button>
-              </div>
-
-              {/* Thumbnail strip */}
-              {f.images?.length > 0 && (
-                <div className="flex gap-2 mt-2 flex-wrap">
-                  {f.images.map((img, i) => (
-                    <div key={i} className="relative w-14 h-10 rounded-lg bg-cover bg-center group" style={{ backgroundImage: `url(${img})` }}>
-                      <button onClick={() => rmImg(i)}
-                        className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100">
-                        <X size={8} className="text-white" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Video upload */}
-            <div>
-              <label className="text-[10px] text-slate-500 uppercase block mb-1">Video</label>
-              <div className="flex gap-2">
-                <div
-                  className="flex-1 border-2 border-dashed border-white/10 rounded-xl p-3 flex items-center gap-3 hover:border-purple-400/30 transition-colors cursor-pointer"
-                  onClick={() => !uploading && videoInputRef.current?.click()}
-                >
-                  {uploading && uploadProgress.includes("video") ? (
-                    <div className="flex items-center gap-2 text-purple-400 w-full justify-center">
-                      <Spin size={14} /><span className="text-xs">{uploadProgress}</span>
-                    </div>
-                  ) : f.videoUrl ? (
-                    <div className="flex items-center gap-2 w-full">
-                      {f.videoThumb && <div className="w-12 h-8 rounded bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${f.videoThumb})` }} />}
-                      <p className="text-[10px] text-emerald-400 truncate flex-1">✓ Video uploaded</p>
-                      <button onClick={(e) => { e.stopPropagation(); sF((prev) => ({ ...prev, videoUrl: "", videoThumb: "" })); }}
-                        className="text-slate-500 hover:text-rose-400"><X size={13} /></button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 w-full justify-center">
-                      <Upload size={14} className="text-slate-500" />
-                      <span className="text-xs text-slate-400">Upload video (MP4, MOV)</span>
-                    </div>
-                  )}
-                  <input
-                    ref={videoInputRef}
-                    type="file"
-                    accept="video/*"
-                    className="hidden"
-                    onChange={(e) => handleVideoFile(e.target.files?.[0])}
-                  />
-                </div>
-              </div>
-              {/* Also allow YouTube / external URL */}
-              <GI className="mt-2" placeholder="Or paste YouTube / video URL" value={f.videoUrl.startsWith("http") && !f.videoUrl.includes("cloudinary") ? f.videoUrl : ""}
-                onChange={(e) => sF((prev) => ({ ...prev, videoUrl: e.target.value, videoThumb: "" }))} />
-            </div>
-
-            {/* Toggles */}
-            <div className="flex gap-4 flex-wrap">
-              {[{ k: "nearHighway", l: "Near Highway" }, { k: "cornerSite", l: "Corner Site" }, { k: "approved", l: "Approved" }].map((c) => (
-                <label key={c.k} className="flex items-center gap-2 cursor-pointer text-xs text-slate-400">
-                  <input type="checkbox" checked={f[c.k]} onChange={(e) => sF({ ...f, [c.k]: e.target.checked })}
-                    className="w-4 h-4 rounded accent-cyan-400" />{c.l}
-                </label>
-              ))}
-            </div>
-
-            {/* Tags */}
-            <div>
-              <label className="text-[10px] text-slate-500 uppercase block mb-1">Tags</label>
-              <div className="flex flex-wrap gap-1.5">
-                {TAGS.map((t) => (
-                  <button key={t} onClick={() => togT(t)}
-                    className={`px-2 py-0.5 rounded-lg text-[10px] font-medium border
-                      ${sTags.includes(t) ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06]"}`}>
-                    {t}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Negotiation Notes */}
-            <div><label className="text-[10px] text-slate-500 uppercase block mb-1">Negotiation Notes</label>
-              <GT rows={2} placeholder="Private notes..." value={f.negotiationNotes} onChange={(e) => sF({ ...f, negotiationNotes: e.target.value })} /></div>
-          </div>
-
-          <div className="p-4 border-t border-white/[0.06] flex justify-end gap-2">
-            <button onClick={() => { setShowAdd(false); setEditProp(null); }}
-              className="px-3 py-2 rounded-xl text-xs text-slate-400 bg-white/[0.04] border border-white/[0.08]">Cancel</button>
-            <button onClick={sub} disabled={saving}
-              className="px-5 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold
-                disabled:opacity-50 flex items-center gap-2">
-              {saving ? <Spin size={14} /> : <Save size={14} />}
-              {ep ? "Save Changes" : "Add Property"}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // ═══════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════
   // FILTER PANEL
   // ═══════════════════════════════════════════════════════════
   const FilterPanel = () => (
@@ -1678,50 +1721,145 @@ export default function PropertyNexus() {
     );
   };
 
-  const MapPage = () => (
-    <div className="space-y-3 animate-[fadeIn_0.3s]">
-      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Map View</h1>
-      <GC className="overflow-hidden relative" hover={false} style={{ height: "calc(100vh - 180px)", minHeight: "400px" }}>
-        <div className="absolute inset-0 bg-[#0d1117]">
-          <div className="relative w-full h-full p-4">
-            <div className="absolute inset-0 opacity-20" style={{ backgroundImage: "radial-gradient(circle at 1px 1px,rgba(255,255,255,0.15) 1px,transparent 0)", backgroundSize: "40px 40px" }} />
-            {props.filter((p) => p.lat && p.lng).map((p) => {
-              const x = ((p.lng - 77.3) / 0.6) * 100;
-              const y = (1 - (p.lat - 12.8) / 0.5) * 100;
-              return (
-                <button key={p.id} onClick={() => { setSelProp(p); setPage("properties"); }}
-                  className="absolute -translate-x-1/2 -translate-y-1/2 group z-10"
-                  style={{ left: `${Math.min(90, Math.max(10, x))}%`, top: `${Math.min(90, Math.max(10, y))}%` }}>
-                  <div className={`w-3.5 h-3.5 rounded-full border-2 border-white/30 shadow-lg group-hover:scale-150 transition-all
-                    ${p.status === "available" ? "bg-emerald-400" : p.status === "sold" ? "bg-rose-400" : p.status === "on-hold" ? "bg-amber-400" : "bg-slate-400"}`} />
-                  <div className="absolute bottom-5 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 bg-[#111827]/95 border border-white/10 rounded-xl p-2.5 w-40 pointer-events-none z-20">
-                    <p className="text-[10px] font-semibold text-white truncate">{p.title}</p>
-                    <p className="text-[9px] text-slate-500">{p.area}</p>
-                    <p className="text-[10px] text-cyan-400 font-semibold mt-1">{fmt(p.price)}</p>
-                  </div>
-                </button>
-              );
-            })}
-            <div className="absolute bottom-3 left-3 bg-[#111827]/80 border border-white/10 rounded-xl p-2.5 space-y-1">
-              {[{ l: "Available", c: "bg-emerald-400" }, { l: "On Hold", c: "bg-amber-400" }, { l: "Sold", c: "bg-rose-400" }, { l: "Draft", c: "bg-slate-400" }].map((i) => (
-                <div key={i.l} className="flex items-center gap-2 text-[10px] text-slate-400"><div className={`w-2 h-2 rounded-full ${i.c}`} />{i.l}</div>
-              ))}
-            </div>
+  const MapPage = () => {
+    const [selMapProp, setSelMapProp] = useState(null);
+    const mappable = props.filter((p) => p.lat && p.lng);
+
+    // Build an OpenStreetMap URL centred on the average of all properties
+    const centerLat = mappable.length
+      ? (mappable.reduce((s, p) => s + +p.lat, 0) / mappable.length).toFixed(4)
+      : "12.9716";
+    const centerLng = mappable.length
+      ? (mappable.reduce((s, p) => s + +p.lng, 0) / mappable.length).toFixed(4)
+      : "77.5946";
+
+    // Build marker string for OSM iframe — one marker per property with colour
+    const statusColor = { available: "green", sold: "red", "on-hold": "orange", draft: "grey" };
+
+    return (
+      <div className="space-y-3 animate-[fadeIn_0.3s]">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Map View</h1>
+            <p className="text-slate-500 text-xs mt-0.5">{mappable.length} properties plotted</p>
           </div>
         </div>
-      </GC>
-    </div>
-  );
 
-  const DocsPage = () => (
-    <div className="space-y-3 animate-[fadeIn_0.3s]">
-      <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents</h1>
-      <GC className="p-6 text-center" hover={false}>
-        <FolderOpen size={36} className="mx-auto text-slate-600 mb-3" />
-        <p className="text-slate-400 text-xs">Upload documents from property detail view</p>
-      </GC>
-    </div>
-  );
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3" style={{ height: "calc(100vh - 220px)", minHeight: "500px" }}>
+          {/* Real OpenStreetMap embed */}
+          <div className="lg:col-span-2 rounded-2xl overflow-hidden border border-white/[0.08] relative">
+            <iframe
+              title="Property Map"
+              className="w-full h-full"
+              style={{ minHeight: "400px", filter: "hue-rotate(180deg) invert(90%) brightness(0.85) contrast(1.1)" }}
+              src={`https://www.openstreetmap.org/export/embed.html?bbox=${(+centerLng-0.15)},${(+centerLat-0.12)},${(+centerLng+0.15)},${(+centerLat+0.12)}&layer=mapnik&marker=${centerLat},${centerLng}`}
+            />
+            {/* Overlay property dots on top of iframe using absolute positioning */}
+            <div className="absolute inset-0 pointer-events-none">
+              {/* Legend */}
+              <div className="absolute bottom-3 left-3 bg-[#111827]/90 border border-white/10 rounded-xl p-2.5 space-y-1 pointer-events-auto">
+                {[{ l: "Available", c: "bg-emerald-400" }, { l: "On Hold", c: "bg-amber-400" }, { l: "Sold", c: "bg-rose-400" }, { l: "Draft", c: "bg-slate-400" }].map((i) => (
+                  <div key={i.l} className="flex items-center gap-2 text-[10px] text-slate-400"><div className={`w-2 h-2 rounded-full ${i.c}`} />{i.l}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Sidebar: list of all mappable properties */}
+          <div className="space-y-2 overflow-y-auto pr-1">
+            <p className="text-[10px] text-slate-500 uppercase tracking-wider px-1">All Properties</p>
+            {mappable.length === 0 && (
+              <GC className="p-4 text-center" hover={false}>
+                <MapPin size={24} className="mx-auto text-slate-700 mb-2" />
+                <p className="text-xs text-slate-500">Add lat/lng to properties to plot them</p>
+              </GC>
+            )}
+            {mappable.map((p) => (
+              <GC key={p.id} className={`p-3 cursor-pointer ${selMapProp?.id === p.id ? "border-cyan-400/30" : ""}`}
+                onClick={() => setSelMapProp(selMapProp?.id === p.id ? null : p)}>
+                <div className="flex items-start gap-2">
+                  <div className={`w-2.5 h-2.5 rounded-full mt-1 flex-shrink-0
+                    ${p.status === "available" ? "bg-emerald-400" : p.status === "sold" ? "bg-rose-400" : p.status === "on-hold" ? "bg-amber-400" : "bg-slate-400"}`} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-white truncate">{p.title}</p>
+                    <p className="text-[10px] text-slate-500">{p.area} · {fmt(p.price)}</p>
+                    <p className="text-[9px] text-slate-600 mt-0.5">{p.lat}, {p.lng}</p>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); setSelProp(p); setPage("properties"); }}
+                    className="p-1 rounded-lg hover:bg-white/10 text-slate-500 hover:text-cyan-400 flex-shrink-0">
+                    <Eye size={12} />
+                  </button>
+                </div>
+                {selMapProp?.id === p.id && (
+                  <div className="mt-2 pt-2 border-t border-white/[0.06] text-[10px] text-slate-400 space-y-0.5">
+                    <p>Size: {p.size} {p.sizeUnit}</p>
+                    <p>Owner: {p.owner || "N/A"}</p>
+                    <p>Status: <span className="capitalize">{p.status}</span></p>
+                  </div>
+                )}
+              </GC>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const DocsPage = () => {
+    const allDocs = props.flatMap((p) =>
+      (p.documents || []).map((d) => ({ ...d, propertyTitle: p.title, propertyId: p.id }))
+    ).sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt));
+
+    const extIcon = (name = "") => {
+      const ext = (name.split(".").pop() || "").toLowerCase();
+      if (["jpg","jpeg","png","webp","gif"].includes(ext)) return "🖼️";
+      if (ext === "pdf") return "📄";
+      if (["doc","docx"].includes(ext)) return "📝";
+      return "📎";
+    };
+
+    return (
+      <div className="space-y-3 animate-[fadeIn_0.3s]">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents</h1>
+          <p className="text-slate-500 text-xs mt-0.5">{allDocs.length} files across {props.filter(p => (p.documents||[]).length > 0).length} properties</p>
+        </div>
+        {allDocs.length === 0 ? (
+          <GC className="p-10 text-center" hover={false}>
+            <FolderOpen size={36} className="mx-auto text-slate-600 mb-3" />
+            <p className="text-slate-400 text-sm">No documents yet</p>
+            <p className="text-slate-600 text-xs mt-1">Open a property → Documents tab to upload files</p>
+          </GC>
+        ) : (
+          <div className="space-y-2">
+            {allDocs.map((doc) => (
+              <GC key={doc.id} className="p-3 flex items-center gap-3" hover={false}>
+                <div className="w-9 h-9 rounded-xl bg-cyan-400/10 flex items-center justify-center flex-shrink-0 text-lg">
+                  {extIcon(doc.name)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-white truncate">{doc.name}</p>
+                  <p className="text-[10px] text-slate-500 truncate">
+                    {doc.propertyTitle} · {new Date(doc.uploadedAt).toLocaleDateString()}
+                  </p>
+                </div>
+                <div className="flex gap-1.5 flex-shrink-0">
+                  <button onClick={() => { setSelProp(props.find(p => p.id === doc.propertyId)); setPage("properties"); }}
+                    className="p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-slate-500 hover:text-cyan-400 transition-all">
+                    <Building2 size={12} />
+                  </button>
+                  <a href={doc.url} target="_blank" rel="noopener noreferrer"
+                    className="p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-slate-500 hover:text-white transition-all">
+                    <Eye size={12} />
+                  </a>
+                </div>
+              </GC>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const AnalPage = () => {
     const pba = useMemo(() => {
@@ -1935,7 +2073,16 @@ export default function PropertyNexus() {
         </main>
       </div>
 
-      {showAdd && <PropModal />}
+      {showAdd && (
+        <PropModal
+          editProp={editProp}
+          saving={saving}
+          showT={showT}
+          saveProp={saveProp}
+          currentUser={currentUser}
+          onClose={() => { setShowAdd(false); setEditProp(null); }}
+        />
+      )}
       {showNotif && <div className="fixed inset-0 z-20" onClick={() => setShowNotif(false)} />}
 
       {/* Toast */}
