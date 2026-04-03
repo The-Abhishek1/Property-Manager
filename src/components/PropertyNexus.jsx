@@ -37,7 +37,6 @@ const uploadToCloudinary = async (file, propertyId = "general") => {
   }
 
   const data = await res.json();
-  // Returns { url, thumbnailUrl, resourceType, publicId, name }
   return data;
 };
 
@@ -120,8 +119,6 @@ const TAGS = [
   "industrial", "commercial",
 ];
 
-// SALES is now computed dynamically from real props in the Dashboard component
-
 // ═══════════════════════════════════════════════════════════
 // GLASS UI COMPONENTS
 // ═══════════════════════════════════════════════════════════
@@ -194,21 +191,19 @@ const TI = ({ type, size = 16 }) => {
 const Spin = ({ size = 20 }) => <Loader2 size={size} className="animate-spin text-cyan-400" />;
 
 // ═══════════════════════════════════════════════════════════
-// ROLE CONFIG — add emails that should have full admin access.
-// All other authenticated users are read-only "viewers".
+// ROLE CONFIG
 // ═══════════════════════════════════════════════════════════
 const ADMIN_EMAILS = [
   "admin@propertynexus.com",
-  // add more admin emails here, e.g. "owner@yourdomain.com"
 ];
 
 const getUserRole = (email) =>
   email && ADMIN_EMAILS.includes(email.toLowerCase()) ? "admin" : "viewer";
+
 // ═══════════════════════════════════════════════════════════
-// ADD / EDIT MODAL  — top-level component so React never
-// unmounts it mid-upload when parent state changes
+// ADD / EDIT MODAL
 // ═══════════════════════════════════════════════════════════
-const PropModal = ({ editProp: ep, saving, showT, saveProp, onClose, currentUser }) => {
+const PropModal = ({ editProp: ep, saving, showT, saveProp, onClose, currentUser, isAdmin }) => {
   const fileInputRef = useRef(null);
   const videoInputRef = useRef(null);
 
@@ -230,12 +225,6 @@ const PropModal = ({ editProp: ep, saving, showT, saveProp, onClose, currentUser
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState("");
   const [imgUrl, sImgUrl] = useState("");
-
-  const TAGS = [
-    "investment", "prime-location", "near-highway", "corner-site", "approved",
-    "luxury", "urgent-sale", "gated-community", "near-it-park", "high-roi",
-    "industrial", "commercial",
-  ];
 
   const togT = (t) => sSTags((ts) => ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]);
   const addImg = () => {
@@ -301,14 +290,6 @@ const PropModal = ({ editProp: ep, saving, showT, saveProp, onClose, currentUser
       pricePerUnit: +f.pricePerUnit || 0, size: +f.size || 0,
       lat: +f.lat || 0, lng: +f.lng || 0, tags: sTags,
     });
-  };
-
-  const fmt = (n) => {
-    if (!n && n !== 0) return "₹0";
-    n = Number(n);
-    if (n >= 1e7) return `₹${(n / 1e7).toFixed(2)} Cr`;
-    if (n >= 1e5) return `₹${(n / 1e5).toFixed(2)} L`;
-    return `₹${n.toLocaleString("en-IN")}`;
   };
 
   return (
@@ -466,7 +447,6 @@ const PropModal = ({ editProp: ep, saving, showT, saveProp, onClose, currentUser
                 <ImageIcon size={14} />
               </button>
             </div>
-            {/* FIX 2: Show uploaded images as <img> tags not background-image so they actually render */}
             {f.images?.length > 0 && (
               <div className="flex gap-2 mt-2 flex-wrap">
                 {f.images.map((img, i) => (
@@ -566,11 +546,27 @@ const PropModal = ({ editProp: ep, saving, showT, saveProp, onClose, currentUser
 };
 
 // ═══════════════════════════════════════════════════════════
-// DOCUMENT TAB — upload docs to Cloudinary, store refs in RTDB
+// DOCUMENT TAB — Fixed: added isAdmin prop
 // ═══════════════════════════════════════════════════════════
-const DocTab = ({ property: p, showT }) => {
+const DocTab = ({ property: p, showT, allProps, isAdmin }) => {
   const docInputRef = useRef(null);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [viewMode, setViewMode] = useState("grid");
+
+  const getDocMeta = (doc) => {
+    const ext = (doc.name || "").split(".").pop().toLowerCase();
+    const mime = doc.type || "";
+    const isImg  = mime.startsWith("image/") || ["jpg","jpeg","png","webp","gif"].includes(ext);
+    const isVid  = mime.startsWith("video/") || ["mp4","mov","avi","webm","mkv"].includes(ext);
+    const isPdf  = ext === "pdf" || mime === "application/pdf";
+    const isDoc  = ["doc","docx"].includes(ext);
+    return { isImg, isVid, isPdf, isDoc,
+      label: isImg ? "Image" : isVid ? "Video" : isPdf ? "PDF" : isDoc ? "Doc" : "File",
+      color: isImg ? "text-emerald-400 bg-emerald-400/10" : isVid ? "text-purple-400 bg-purple-400/10"
+           : isPdf ? "text-rose-400 bg-rose-400/10" : "text-cyan-400 bg-cyan-400/10",
+    };
+  };
 
   const handleDocFiles = async (fileList) => {
     const files = Array.from(fileList);
@@ -579,6 +575,7 @@ const DocTab = ({ property: p, showT }) => {
     const existing = p.documents || [];
     const newDocs = [...existing];
     for (let i = 0; i < files.length; i++) {
+      setProgress(`Uploading ${i + 1} of ${files.length}: ${files[i].name}`);
       try {
         const result = await uploadToCloudinary(files[i], p.id);
         newDocs.push({
@@ -586,63 +583,154 @@ const DocTab = ({ property: p, showT }) => {
           name: files[i].name,
           type: files[i].type,
           url: result.url,
+          thumbnailUrl: result.thumbnailUrl || null,
           publicId: result.publicId,
+          resourceType: result.resourceType || "image",
           uploadedAt: new Date().toISOString(),
         });
       } catch (err) {
-        showT("Doc upload failed: " + err.message, "error");
+        showT(`"${files[i].name}" failed: ${err.message}`, "error");
       }
     }
     await fbUpdate(`properties/${p.id}`, { documents: newDocs });
-    showT("Document(s) uploaded");
+    showT(`${files.length} file(s) uploaded`);
+    setProgress("");
     setUploading(false);
   };
 
-  const docs = p.documents || [];
+  const removeDoc = async (docId) => {
+    const updated = (p.documents || []).filter(d => d.id !== docId);
+    await fbUpdate(`properties/${p.id}`, { documents: updated });
+    showT("Removed");
+  };
+
+  const liveProp = allProps ? allProps.find(x => x.id === p.id) : null;
+  const docs = (liveProp || p).documents || [];
 
   return (
     <GC className="p-4 space-y-3" hover={false}>
-      <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents & Media</h3>
+        {docs.length > 0 && (
+          <div className="flex gap-1">
+            <button onClick={() => setViewMode("grid")} className={`p-1.5 rounded-lg text-xs ${viewMode==="grid"?"bg-white/10 text-white":"text-slate-500"}`}>⊞</button>
+            <button onClick={() => setViewMode("list")} className={`p-1.5 rounded-lg text-xs ${viewMode==="list"?"bg-white/10 text-white":"text-slate-500"}`}>≡</button>
+          </div>
+        )}
+      </div>
+
       <div
-        className="border-2 border-dashed border-white/10 rounded-xl p-6 text-center hover:border-cyan-400/30 transition-colors cursor-pointer"
+        className="border-2 border-dashed border-white/10 rounded-xl p-5 text-center hover:border-cyan-400/30 transition-colors cursor-pointer"
         onClick={() => !uploading && docInputRef.current?.click()}
         onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleDocFiles(e.dataTransfer.files); }}
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); }}
       >
         {uploading ? (
-          <div className="flex items-center justify-center gap-2 text-cyan-400">
-            <Loader2 size={18} className="animate-spin" />
-            <span className="text-xs">Uploading…</span>
+          <div className="space-y-2">
+            <div className="flex items-center justify-center gap-2 text-cyan-400">
+              <Loader2 size={18} className="animate-spin" />
+              <span className="text-xs font-medium">Uploading…</span>
+            </div>
+            <p className="text-[10px] text-slate-500 truncate max-w-xs mx-auto">{progress}</p>
           </div>
         ) : (
           <>
-            <Upload size={22} className="mx-auto text-slate-500 mb-2" />
-            <p className="text-xs text-slate-400">Click or drag & drop documents</p>
-            <p className="text-[10px] text-slate-600 mt-1">PDF, DOCX, images — title deeds, sale agreements, tax docs</p>
+            <Upload size={20} className="mx-auto text-slate-500 mb-2" />
+            <p className="text-xs text-slate-400 font-medium">Click or drag & drop</p>
+            <p className="text-[10px] text-slate-600 mt-1">Images · PDFs · Videos · Word docs · Any file</p>
           </>
         )}
-        <input ref={docInputRef} type="file" multiple accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp" className="hidden"
+        <input ref={docInputRef} type="file" multiple accept="*/*" className="hidden"
           onChange={(e) => handleDocFiles(e.target.files)} />
       </div>
-      {docs.length === 0 && !uploading && <p className="text-xs text-slate-600 text-center py-2">No documents yet</p>}
-      <div className="space-y-2">
-        {docs.map((doc) => (
-          <div key={doc.id} className="flex items-center gap-3 p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-            <div className="w-8 h-8 rounded-lg bg-cyan-400/10 flex items-center justify-center flex-shrink-0">
-              <FileText size={14} className="text-cyan-400" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-slate-200 truncate">{doc.name}</p>
-              <p className="text-[10px] text-slate-500">{new Date(doc.uploadedAt).toLocaleDateString()}</p>
-            </div>
-            <a href={doc.url} target="_blank" rel="noopener noreferrer"
-              className="p-1.5 rounded-lg bg-white/[0.06] text-slate-400 hover:text-white transition-all">
-              <Eye size={13} />
-            </a>
-          </div>
-        ))}
-      </div>
+
+      {docs.length === 0 && !uploading && (
+        <p className="text-xs text-slate-600 text-center py-3">No files yet</p>
+      )}
+
+      {viewMode === "grid" && docs.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {docs.map((doc) => {
+            const meta = getDocMeta(doc);
+            return (
+              <div key={doc.id} className="relative group rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.03]">
+                {meta.isImg ? (
+                  <div className="h-24 bg-slate-800 overflow-hidden">
+                    <img src={doc.url} alt={doc.name} className="w-full h-full object-cover" onError={e=>e.target.style.opacity='0'} />
+                  </div>
+                ) : meta.isVid ? (
+                  <div className="h-24 bg-slate-800 flex items-center justify-center relative overflow-hidden">
+                    {doc.thumbnailUrl && <img src={doc.thumbnailUrl} alt="" className="absolute inset-0 w-full h-full object-cover opacity-50" />}
+                    <div className="relative z-10 w-8 h-8 rounded-full bg-white/20 flex items-center justify-center">
+                      <span className="text-white text-xs">▶</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={`h-24 flex flex-col items-center justify-center gap-1 ${meta.color}`}>
+                    <FileText size={28} />
+                    <span className="text-[10px] font-bold uppercase">{meta.label}</span>
+                  </div>
+                )}
+                <div className="p-2">
+                  <p className="text-[10px] text-slate-300 truncate font-medium">{doc.name}</p>
+                  <p className="text-[9px] text-slate-600">{new Date(doc.uploadedAt).toLocaleDateString()}</p>
+                </div>
+                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                  <a href={doc.url} target="_blank" rel="noopener noreferrer"
+                    className="p-2 rounded-lg bg-white/20 text-white hover:bg-white/30 transition-all">
+                    <Eye size={14} />
+                  </a>
+                  {isAdmin && (
+                    <button onClick={() => removeDoc(doc.id)}
+                      className="p-2 rounded-lg bg-rose-500/30 text-rose-300 hover:bg-rose-500/50 transition-all">
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+                <div className={`absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase ${meta.color}`}>
+                  {meta.label}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {viewMode === "list" && docs.length > 0 && (
+        <div className="space-y-1.5">
+          {docs.map((doc) => {
+            const meta = getDocMeta(doc);
+            return (
+              <div key={doc.id} className="flex items-center gap-3 p-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] group">
+                <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${meta.color}`}>
+                  <FileText size={14} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-slate-200 truncate">{doc.name}</p>
+                  <div className="flex gap-2 text-[10px] text-slate-500">
+                    <span className="uppercase font-medium">{meta.label}</span>
+                    <span>·</span>
+                    <span>{new Date(doc.uploadedAt).toLocaleDateString()}</span>
+                  </div>
+                </div>
+                <div className="flex gap-1 flex-shrink-0">
+                  <a href={doc.url} target="_blank" rel="noopener noreferrer"
+                    className="p-1.5 rounded-lg bg-white/[0.06] text-slate-400 hover:text-white transition-all">
+                    <Eye size={13} />
+                  </a>
+                  {isAdmin && (
+                    <button onClick={() => removeDoc(doc.id)}
+                      className="p-1.5 rounded-lg bg-white/[0.06] text-slate-400 hover:text-rose-400 transition-all">
+                      <Trash2 size={13} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </GC>
   );
 };
@@ -720,14 +808,13 @@ const AuthScreen = ({ mode, setMode, form, setForm, onSubmit, error, busy }) => 
 
 export default function PropertyNexus() {
   // ─── Auth state ───
-  const [currentUser, setCurrentUser] = useState(null);  // Firebase Auth user object
+  const [currentUser, setCurrentUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState("login");
   const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
 
-  // Derived role — admin emails defined in ADMIN_EMAILS above; everyone else is viewer
   const userRole = getUserRole(currentUser?.email);
   const isAdmin = userRole === "admin";
 
@@ -747,7 +834,6 @@ export default function PropertyNexus() {
   const [editProp, setEditProp] = useState(null);
   const [viewMode, setViewMode] = useState("grid");
   const [search, setSearch] = useState("");
-  const [mobSearch, setMobSearch] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [toast, setToast] = useState(null);
   const [flt, setFlt] = useState({
@@ -762,7 +848,6 @@ export default function PropertyNexus() {
 
   const unread = notifs.filter((n) => !n.read).length;
 
-  // ─── Auth handlers ───
   const handleAuth = async (e) => {
     e && e.preventDefault && e.preventDefault();
     setAuthError("");
@@ -775,7 +860,6 @@ export default function PropertyNexus() {
         if (authForm.name.trim()) {
           await updateProfile(cred.user, { displayName: authForm.name.trim() });
         }
-        // Write user record immediately on signup so Users page shows them right away
         const role = getUserRole(authForm.email);
         await fbUpdate(`users/${cred.user.uid}`, {
           uid: cred.user.uid,
@@ -806,12 +890,10 @@ export default function PropertyNexus() {
     setPage("dashboard"); setSelProp(null);
   };
 
-  // ─── Listen for auth state, then subscribe to RTDB ───
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setAuthLoading(false);
-      // Upsert user record into RTDB so the Users page shows real signed-in users
       if (user) {
         fbUpdate(`users/${user.uid}`, {
           uid: user.uid,
@@ -825,7 +907,6 @@ export default function PropertyNexus() {
     return () => unsubAuth();
   }, []);
 
-  // ─── Firebase realtime subscriptions (only when logged in) ───
   useEffect(() => {
     if (!currentUser) { setLoading(false); return; }
     setLoading(true);
@@ -849,17 +930,29 @@ export default function PropertyNexus() {
     };
   }, [currentUser]);
 
-  // ─── Filtered properties ───
   const filtered = useMemo(() => {
     return props.filter((p) => {
       if (search) {
-        const q = search.toLowerCase();
-        if (
-          !(p.title || "").toLowerCase().includes(q) &&
-          !(p.area || "").toLowerCase().includes(q) &&
-          !(p.id || "").toLowerCase().includes(q) &&
-          !(p.city || "").toLowerCase().includes(q)
-        ) return false;
+        const q = search.toLowerCase().trim();
+        const numQ = parseFloat(q.replace(/[₹,\s]/g, ""));
+        const priceMatch = (() => {
+          if (isNaN(numQ)) return false;
+          const multiplier = q.includes("cr") ? 1e7 : q.includes("l") ? 1e5 : 1;
+          const target = numQ * multiplier;
+          return Math.abs((p.price || 0) - target) / Math.max(target, 1) < 0.2;
+        })();
+        const textMatch =
+          (p.title || "").toLowerCase().includes(q) ||
+          (p.area || "").toLowerCase().includes(q) ||
+          (p.city || "").toLowerCase().includes(q) ||
+          (p.state || "").toLowerCase().includes(q) ||
+          (p.pincode || "").includes(q) ||
+          (p.id || "").toLowerCase().includes(q) ||
+          (p.owner || "").toLowerCase().includes(q) ||
+          (p.type || "").toLowerCase().includes(q) ||
+          (p.status || "").toLowerCase().includes(q) ||
+          (p.tags || []).some(t => t.toLowerCase().includes(q));
+        if (!textMatch && !priceMatch) return false;
       }
       if (flt.type && p.type !== flt.type) return false;
       if (flt.category && p.category !== flt.category) return false;
@@ -875,7 +968,6 @@ export default function PropertyNexus() {
     });
   }, [props, search, flt]);
 
-  // ─── Stats ───
   const st = useMemo(() => {
     const t = props.length;
     const a = props.filter((p) => p.status === "available").length;
@@ -887,7 +979,6 @@ export default function PropertyNexus() {
     return { t, a, s, h, tv, sv, mv };
   }, [props]);
 
-  // ─── CRUD handlers ───
   const togFav = async (id) => {
     if (!isAdmin) { showT("Viewers cannot modify properties", "error"); return; }
     const p = props.find((x) => x.id === id);
@@ -960,7 +1051,6 @@ export default function PropertyNexus() {
     area: "", nearHighway: "", cornerSite: "", facing: "", favOnly: false,
   });
 
-  // ─── NAV items ───
   const navItems = [
     { id: "dashboard", icon: LayoutDashboard, l: "Dashboard" },
     { id: "properties", icon: Building2, l: "Properties" },
@@ -974,9 +1064,6 @@ export default function PropertyNexus() {
     { id: "settings", icon: Settings, l: "Settings" },
   ];
 
-  // ═══════════════════════════════════════════════════════════
-  // SIDEBAR
-  // ═══════════════════════════════════════════════════════════
   const SidebarComp = () => (
     <>
       {sidebar && (
@@ -985,7 +1072,6 @@ export default function PropertyNexus() {
       <div className={`fixed left-0 top-0 h-screen z-50 w-[260px] bg-[#0c1121]/95 backdrop-blur-2xl
         border-r border-white/[0.06] flex flex-col transition-transform duration-300
         ${sidebar ? "translate-x-0" : "-translate-x-full"} lg:translate-x-0`}>
-
         <div className="p-4 flex items-center justify-between border-b border-white/[0.06] h-16">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-400 to-purple-500 flex items-center justify-center">
@@ -998,7 +1084,6 @@ export default function PropertyNexus() {
             <X size={18} />
           </button>
         </div>
-
         <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
           {navItems.map((item) => (
             <button
@@ -1015,7 +1100,6 @@ export default function PropertyNexus() {
             </button>
           ))}
         </nav>
-
         <div className="p-3 border-t border-white/[0.06]">
           <div className={`flex items-center gap-2 px-3 py-2 text-xs ${fbOk ? "text-emerald-400" : "text-rose-400"}`}>
             <div className={`w-2 h-2 rounded-full ${fbOk ? "bg-emerald-400 animate-pulse" : "bg-rose-400"}`} />
@@ -1026,42 +1110,45 @@ export default function PropertyNexus() {
     </>
   );
 
-  // ═══════════════════════════════════════════════════════════
-  // TOPBAR
-  // ═══════════════════════════════════════════════════════════
   const TopBar = () => (
     <div className="h-14 sm:h-16 bg-[#0c1121]/60 backdrop-blur-2xl border-b border-white/[0.06]
       flex items-center justify-between px-3 sm:px-6 sticky top-0 z-30">
-      <div className="flex items-center gap-2 sm:gap-4 flex-1">
-        <button onClick={() => setSidebar(true)} className="lg:hidden p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/[0.06]">
+      <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
+        <button onClick={() => setSidebar(true)} className="lg:hidden p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/[0.06] flex-shrink-0">
           <Menu size={20} />
         </button>
-        {/* Desktop search */}
-        <div className="relative hidden sm:block max-w-md flex-1">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-          <GI placeholder="Search properties, areas, IDs..." value={search}
-            onChange={(e) => setSearch(e.target.value)} className="pl-10 !py-2" />
+        <div className="relative flex-1 min-w-0 max-w-md">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+          <input
+            key="search-input"
+            placeholder="Search title, area, price, owner, tag…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full bg-white/[0.06] border border-white/10 rounded-xl pl-9 pr-8 py-2 text-slate-100 text-sm
+              placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50 focus:ring-1 focus:ring-cyan-400/10 transition-all"
+          />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
-        {/* Mobile search toggle */}
-        <button onClick={() => setMobSearch(!mobSearch)} className="sm:hidden p-2 rounded-xl text-slate-400">
-          <Search size={18} />
-        </button>
       </div>
-
       <div className="flex items-center gap-2 sm:gap-3">
         {isAdmin && (
-        <button
-          onClick={() => { setShowAdd(true); setEditProp(null); }}
-          className="flex items-center gap-1.5 px-3 sm:px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500
-            rounded-xl text-slate-900 text-xs sm:text-sm font-bold
-            hover:shadow-[0_8px_30px_-8px_rgba(0,240,255,0.4)] transition-all"
-        >
-          <Plus size={15} />
-          <span className="hidden sm:inline">Add Property</span>
-        </button>
+          <button
+            onClick={() => { setShowAdd(true); setEditProp(null); }}
+            className="flex items-center gap-1.5 px-2.5 sm:px-4 py-2 bg-gradient-to-r from-cyan-400 to-purple-500
+              rounded-xl text-slate-900 text-xs sm:text-sm font-bold
+              hover:shadow-[0_8px_30px_-8px_rgba(0,240,255,0.4)] transition-all flex-shrink-0"
+          >
+            <Plus size={15} />
+            <span className="hidden sm:inline">Add Property</span>
+          </button>
         )}
-
-        {/* Notifications */}
         <div className="relative">
           <button
             onClick={() => setShowNotif(!showNotif)}
@@ -1074,7 +1161,6 @@ export default function PropertyNexus() {
                 text-[9px] font-bold text-white flex items-center justify-center">{unread}</span>
             )}
           </button>
-
           {showNotif && (
             <div className="absolute right-0 top-11 sm:top-12 w-72 sm:w-80 bg-[#111827]/95
               backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50">
@@ -1084,7 +1170,6 @@ export default function PropertyNexus() {
                   onClick={async () => {
                     const unreadNotifs = notifs.filter((n) => !n.read);
                     if (!unreadNotifs.length) return;
-                    // Multi-path atomic update — all reads in one RTDB call
                     const updates = {};
                     unreadNotifs.forEach((n) => { updates[`notifications/${n.id}/read`] = true; });
                     try {
@@ -1119,7 +1204,6 @@ export default function PropertyNexus() {
             </div>
           )}
         </div>
-
         <div className="relative">
           <button
             onClick={() => setShowUserMenu((v) => !v)}
@@ -1129,9 +1213,7 @@ export default function PropertyNexus() {
           </button>
           {showUserMenu && (
             <>
-              {/* Click-outside overlay */}
               <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
-              {/* Dropdown */}
               <div className="absolute right-0 top-11 w-52 bg-[#111827]/98 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl z-50 p-1">
                 <div className="px-3 py-2.5 border-b border-white/[0.06]">
                   <p className="text-xs font-medium text-white truncate">{currentUser?.displayName || "User"}</p>
@@ -1154,27 +1236,8 @@ export default function PropertyNexus() {
     </div>
   );
 
-  // ─── Mobile Search ───
-  const MobSrch = () =>
-    mobSearch ? (
-      <div className="sm:hidden px-3 py-2 bg-[#0c1121]/60 backdrop-blur-xl border-b border-white/[0.06]">
-        <div className="relative">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-          <GI placeholder="Search..." value={search} onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 !py-2" autoFocus />
-          {search && (
-            <button onClick={() => { setSearch(""); setMobSearch(false); }}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500"><X size={14} /></button>
-          )}
-        </div>
-      </div>
-    ) : null;
-
-  // ═══════════════════════════════════════════════════════════
-  // DASHBOARD
-  // ═══════════════════════════════════════════════════════════
+  // Dashboard Component
   const Dashboard = () => {
-    // Compute sales trend from real data — last 6 months
     const salesTrend = useMemo(() => {
       const now = new Date();
       return Array.from({ length: 6 }, (_, i) => {
@@ -1187,153 +1250,137 @@ export default function PropertyNexus() {
           const sd = new Date(p.soldDate || p.updatedAt || "");
           return sd.getFullYear() === yr && sd.getMonth() === mo;
         });
-        const added = props.filter((p) => {
-          const cd = new Date(p.createdAt || "");
-          return cd.getFullYear() === yr && cd.getMonth() === mo;
-        });
-        const value = sold.reduce((s, p) => s + (+(p.finalSellingPrice || p.price) || 0), 0) / 1e5; // in Lakhs
-        return { month, sales: sold.length, added: added.length, value: Math.round(value * 10) / 10 };
+        const value = sold.reduce((s, p) => s + (+(p.finalSellingPrice || p.price) || 0), 0) / 1e5;
+        return { month, value: Math.round(value * 10) / 10 };
       });
     }, [props]);
 
     return (
-    <div className="space-y-4 sm:space-y-6 animate-[fadeIn_0.3s]">
-      <div>
-        <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Dashboard</h1>
-        <p className="text-slate-500 text-xs sm:text-sm mt-1">Property portfolio overview</p>
-      </div>
-
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
-        {[
-          { l: "Total", v: st.t, icon: Building2, c: "cyan", sub: `${st.a} available` },
-          { l: "Available", v: st.a, icon: CheckCircle, c: "emerald", sub: fmt(st.tv) },
-          { l: "Sold", v: st.s, icon: TrendingUp, c: "rose", sub: fmt(st.sv) },
-          { l: "On Hold", v: st.h, icon: Clock, c: "amber", sub: `${props.filter((p) => p.status === "draft").length} drafts` },
-        ].map((s, i) => (
-          <GC key={i} className="p-3 sm:p-5" hover={false}>
-            <div className="flex items-start justify-between">
-              <div>
-                <p className="text-slate-500 text-[10px] sm:text-xs font-medium uppercase tracking-wider">{s.l}</p>
-                <p className="text-2xl sm:text-3xl font-bold text-white mt-1 sm:mt-2" style={{ fontFamily: "'Outfit', sans-serif" }}>{s.v}</p>
-                <p className="text-[10px] sm:text-xs text-slate-500 mt-0.5 truncate">{s.sub}</p>
+      <div className="space-y-4 sm:space-y-6 animate-[fadeIn_0.3s]">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Dashboard</h1>
+          <p className="text-slate-500 text-xs sm:text-sm mt-1">Property portfolio overview</p>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
+          {[
+            { l: "Total", v: st.t, icon: Building2, c: "cyan", sub: `${st.a} available` },
+            { l: "Available", v: st.a, icon: CheckCircle, c: "emerald", sub: fmt(st.tv) },
+            { l: "Sold", v: st.s, icon: TrendingUp, c: "rose", sub: fmt(st.sv) },
+            { l: "On Hold", v: st.h, icon: Clock, c: "amber", sub: `${props.filter((p) => p.status === "draft").length} drafts` },
+          ].map((s, i) => (
+            <GC key={i} className="p-3 sm:p-5" hover={false}>
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-slate-500 text-[10px] sm:text-xs font-medium uppercase tracking-wider">{s.l}</p>
+                  <p className="text-2xl sm:text-3xl font-bold text-white mt-1 sm:mt-2" style={{ fontFamily: "'Outfit', sans-serif" }}>{s.v}</p>
+                  <p className="text-[10px] sm:text-xs text-slate-500 mt-0.5 truncate">{s.sub}</p>
+                </div>
+                <div className={`w-8 h-8 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center flex-shrink-0
+                  ${s.c === "cyan" ? "bg-cyan-400/10 text-cyan-400" : s.c === "emerald" ? "bg-emerald-400/10 text-emerald-400"
+                  : s.c === "rose" ? "bg-rose-400/10 text-rose-400" : "bg-amber-400/10 text-amber-400"}`}>
+                  <s.icon size={18} />
+                </div>
               </div>
-              <div className={`w-8 h-8 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center flex-shrink-0
-                ${s.c === "cyan" ? "bg-cyan-400/10 text-cyan-400" : s.c === "emerald" ? "bg-emerald-400/10 text-emerald-400"
-                : s.c === "rose" ? "bg-rose-400/10 text-rose-400" : "bg-amber-400/10 text-amber-400"}`}>
-                <s.icon size={18} />
-              </div>
+            </GC>
+          ))}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4">
+          <GC className="p-4 sm:p-5 lg:col-span-2" hover={false}>
+            <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Sales Trend <span className="text-[10px] font-normal text-slate-500 ml-2">last 6 months · ₹L sold</span></h3>
+            <ResponsiveContainer width="100%" height={180}>
+              <AreaChart data={salesTrend}>
+                <defs>
+                  <linearGradient id="cv" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#00f0ff" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#00f0ff" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                <XAxis dataKey="month" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} />
+                <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} width={30} />
+                <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} />
+                <Area type="monotone" dataKey="value" stroke="#00f0ff" strokeWidth={2} fill="url(#cv)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </GC>
+          <GC className="p-4 sm:p-5" hover={false}>
+            <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>By Type</h3>
+            <ResponsiveContainer width="100%" height={180}>
+              <PieChart>
+                <Pie
+                  data={(() => {
+                    const counts = [
+                      { name: "Land", value: props.filter((p) => p.type === "land").length },
+                      { name: "Plot", value: props.filter((p) => p.type === "plot").length },
+                      { name: "House", value: props.filter((p) => p.type === "house").length },
+                      { name: "Comm", value: props.filter((p) => p.type === "commercial").length },
+                    ];
+                    const total = counts.reduce((s, c) => s + c.value, 0);
+                    return total > 0 ? counts.filter((c) => c.value > 0) : [{ name: "No data", value: 1 }];
+                  })()}
+                  cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={4} dataKey="value"
+                >
+                  {["#00f0ff", "#a855f7", "#34d399", "#fbbf24", "#64748b"].map((c, i) => <Cell key={i} fill={c} />)}
+                </Pie>
+                <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="flex flex-wrap gap-2 mt-1 justify-center">
+              {[{ l: "Land", c: "#00f0ff" }, { l: "Plot", c: "#a855f7" }, { l: "House", c: "#34d399" }, { l: "Comm", c: "#fbbf24" }].map((i) => (
+                <div key={i.l} className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                  <div className="w-2 h-2 rounded-full" style={{ background: i.c }} />{i.l}
+                </div>
+              ))}
             </div>
           </GC>
-        ))}
-      </div>
-
-      {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4">
-        <GC className="p-4 sm:p-5 lg:col-span-2" hover={false}>
-          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Sales Trend <span className="text-[10px] font-normal text-slate-500 ml-2">last 6 months · ₹L sold</span></h3>
-          <ResponsiveContainer width="100%" height={180}>
-            <AreaChart data={salesTrend}>
-              <defs>
-                <linearGradient id="cv" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#00f0ff" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#00f0ff" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-              <XAxis dataKey="month" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} />
-              <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} width={30} />
-              <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} />
-              <Area type="monotone" dataKey="value" stroke="#00f0ff" strokeWidth={2} fill="url(#cv)" />
-            </AreaChart>
-          </ResponsiveContainer>
-        </GC>
-
-        <GC className="p-4 sm:p-5" hover={false}>
-          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>By Type</h3>
-          <ResponsiveContainer width="100%" height={180}>
-            <PieChart>
-              <Pie
-                data={(() => {
-                  const counts = [
-                    { name: "Land", value: props.filter((p) => p.type === "land").length },
-                    { name: "Plot", value: props.filter((p) => p.type === "plot").length },
-                    { name: "House", value: props.filter((p) => p.type === "house").length },
-                    { name: "Comm", value: props.filter((p) => p.type === "commercial").length },
-                  ];
-                  // Only show slices with actual data; fallback to placeholder if all zero
-                  const total = counts.reduce((s, c) => s + c.value, 0);
-                  return total > 0 ? counts.filter((c) => c.value > 0) : [{ name: "No data", value: 1 }];
-                })()}
-                cx="50%" cy="50%" innerRadius={40} outerRadius={65} paddingAngle={4} dataKey="value"
-              >
-                {["#00f0ff", "#a855f7", "#34d399", "#fbbf24", "#64748b"].map((c, i) => <Cell key={i} fill={c} />)}
-              </Pie>
-              <Tooltip contentStyle={{ background: "rgba(17,24,39,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, fontSize: 11, color: "#e2e8f0" }} />
-            </PieChart>
-          </ResponsiveContainer>
-          <div className="flex flex-wrap gap-2 mt-1 justify-center">
-            {[{ l: "Land", c: "#00f0ff" }, { l: "Plot", c: "#a855f7" }, { l: "House", c: "#34d399" }, { l: "Comm", c: "#fbbf24" }].map((i) => (
-              <div key={i.l} className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                <div className="w-2 h-2 rounded-full" style={{ background: i.c }} />{i.l}
-              </div>
-            ))}
-          </div>
-        </GC>
-      </div>
-
-      {/* Most Viewed + Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4">
-        <GC className="p-4 sm:p-5" hover={false}>
-          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Most Viewed</h3>
-          <div className="space-y-2">
-            {st.mv.length === 0 && <p className="text-xs text-slate-600 text-center py-4">No properties yet</p>}
-            {st.mv.map((p, i) => (
-              <div key={p.id} className="flex items-center gap-2 sm:gap-3 p-2 rounded-xl hover:bg-white/[0.04] cursor-pointer"
-                onClick={() => { setSelProp(p); setPage("properties"); }}>
-                <span className="text-[10px] font-mono text-slate-600 w-4">#{i + 1}</span>
-                {p.images?.[0]
-                  ? <div className="w-9 h-9 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${p.images[0]})` }} />
-                  : <div className="w-9 h-9 rounded-lg bg-white/[0.06] flex items-center justify-center flex-shrink-0"><Building2 size={14} className="text-slate-600" /></div>
-                }
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs sm:text-sm text-slate-200 font-medium truncate">{p.title}</p>
-                  <p className="text-[10px] text-slate-500">{p.area} · {fmt(p.price)}</p>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4">
+          <GC className="p-4 sm:p-5" hover={false}>
+            <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Most Viewed</h3>
+            <div className="space-y-2">
+              {st.mv.length === 0 && <p className="text-xs text-slate-600 text-center py-4">No properties yet</p>}
+              {st.mv.map((p, i) => (
+                <div key={p.id} className="flex items-center gap-2 sm:gap-3 p-2 rounded-xl hover:bg-white/[0.04] cursor-pointer"
+                  onClick={() => { setSelProp(p); setPage("properties"); }}>
+                  <span className="text-[10px] font-mono text-slate-600 w-4">#{i + 1}</span>
+                  {p.images?.[0]
+                    ? <div className="w-9 h-9 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${p.images[0]})` }} />
+                    : <div className="w-9 h-9 rounded-lg bg-white/[0.06] flex items-center justify-center flex-shrink-0"><Building2 size={14} className="text-slate-600" /></div>
+                  }
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs sm:text-sm text-slate-200 font-medium truncate">{p.title}</p>
+                    <p className="text-[10px] text-slate-500">{p.area} · {fmt(p.price)}</p>
+                  </div>
+                  <div className="flex items-center gap-1 text-[10px] text-slate-500"><Eye size={11} />{p.views || 0}</div>
                 </div>
-                <div className="flex items-center gap-1 text-[10px] text-slate-500"><Eye size={11} />{p.views || 0}</div>
-              </div>
-            ))}
-          </div>
-        </GC>
-
-        <GC className="p-4 sm:p-5" hover={false}>
-          <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Recent Activity</h3>
-          <div className="space-y-2">
-            {notifs.length === 0 && <p className="text-xs text-slate-600 text-center py-4">No activity yet</p>}
-            {notifs.slice(0, 5).map((n) => (
-              <div key={n.id} className="flex items-start gap-2 p-1.5">
-                <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0
-                  ${n.type === "price_change" ? "bg-amber-400/10 text-amber-400"
-                  : n.type === "status_change" ? "bg-emerald-400/10 text-emerald-400"
-                  : "bg-cyan-400/10 text-cyan-400"}`}>
-                  {n.type === "price_change" ? <TrendingUp size={13} /> : n.type === "status_change" ? <CheckCircle size={13} /> : <Plus size={13} />}
+              ))}
+            </div>
+          </GC>
+          <GC className="p-4 sm:p-5" hover={false}>
+            <h3 className="font-semibold text-sm text-white mb-3" style={{ fontFamily: "'Outfit', sans-serif" }}>Recent Activity</h3>
+            <div className="space-y-2">
+              {notifs.length === 0 && <p className="text-xs text-slate-600 text-center py-4">No activity yet</p>}
+              {notifs.slice(0, 5).map((n) => (
+                <div key={n.id} className="flex items-start gap-2 p-1.5">
+                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0
+                    ${n.type === "price_change" ? "bg-amber-400/10 text-amber-400"
+                    : n.type === "status_change" ? "bg-emerald-400/10 text-emerald-400"
+                    : "bg-cyan-400/10 text-cyan-400"}`}>
+                    {n.type === "price_change" ? <TrendingUp size={13} /> : n.type === "status_change" ? <CheckCircle size={13} /> : <Plus size={13} />}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[11px] text-slate-300 leading-relaxed truncate">{n.message}</p>
+                    <p className="text-[10px] text-slate-600">{ago(n.createdAt)}</p>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <p className="text-[11px] text-slate-300 leading-relaxed truncate">{n.message}</p>
-                  <p className="text-[10px] text-slate-600">{ago(n.createdAt)}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </GC>
+              ))}
+            </div>
+          </GC>
+        </div>
       </div>
-    </div>
     );
   };
 
-  // ═══════════════════════════════════════════════════════════
-  // PROPERTY CARD
-  // ═══════════════════════════════════════════════════════════
   const PCard = ({ property: p }) => (
     <GC className="overflow-hidden group" onClick={() => setSelProp(p)}>
       <div className="relative h-36 sm:h-44 bg-cover bg-center bg-slate-800"
@@ -1380,21 +1427,18 @@ export default function PropertyNexus() {
         <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/[0.06]">
           <div className="flex items-center gap-1 text-[10px] text-slate-500"><Eye size={10} />{p.views || 0}</div>
           {isAdmin && (
-          <div className="flex gap-0.5">
-            <button onClick={(e) => { e.stopPropagation(); setEditProp(p); setShowAdd(true); }}
-              className="p-1 sm:p-1.5 rounded-lg hover:bg-white/[0.08] text-slate-500 hover:text-white transition-all"><Edit size={12} /></button>
-            <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
-              className="p-1 sm:p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-500 hover:text-rose-400 transition-all"><Trash2 size={12} /></button>
-          </div>
+            <div className="flex gap-0.5">
+              <button onClick={(e) => { e.stopPropagation(); setEditProp(p); setShowAdd(true); }}
+                className="p-1 sm:p-1.5 rounded-lg hover:bg-white/[0.08] text-slate-500 hover:text-white transition-all"><Edit size={12} /></button>
+              <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
+                className="p-1 sm:p-1.5 rounded-lg hover:bg-rose-500/10 text-slate-500 hover:text-rose-400 transition-all"><Trash2 size={12} /></button>
+            </div>
           )}
         </div>
       </div>
     </GC>
   );
 
-  // ═══════════════════════════════════════════════════════════
-  // PROPERTY DETAIL
-  // ═══════════════════════════════════════════════════════════
   const PDetail = ({ property: p }) => {
     const [tab, setTab] = useState("overview");
     const [aImg, setAImg] = useState(0);
@@ -1434,8 +1478,6 @@ export default function PropertyNexus() {
         <button onClick={() => setSelProp(null)} className="flex items-center gap-1.5 text-xs sm:text-sm text-slate-400 hover:text-white">
           <ChevronLeft size={16} /> Back
         </button>
-
-        {/* Hero Image */}
         <GC className="overflow-hidden" hover={false}>
           <div className="relative h-48 sm:h-64 md:h-80 bg-cover bg-center bg-slate-800"
             style={lp.images?.[aImg] ? { backgroundImage: `url(${lp.images[aImg]})` } : {}}>
@@ -1463,8 +1505,6 @@ export default function PropertyNexus() {
             </div>
           )}
         </GC>
-
-        {/* Quick Info */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {[
             { l: "Price", v: fmt(lp.price), icon: DollarSign, c: "text-cyan-400" },
@@ -1481,8 +1521,6 @@ export default function PropertyNexus() {
             </GC>
           ))}
         </div>
-
-        {/* Tabs */}
         <div className="flex gap-0.5 p-1 bg-white/[0.03] rounded-xl border border-white/[0.06] overflow-x-auto">
           {["overview", "notes", "buyers", "documents"].map((t) => (
             <button key={t} onClick={() => setTab(t)}
@@ -1492,8 +1530,6 @@ export default function PropertyNexus() {
             </button>
           ))}
         </div>
-
-        {/* Tab: Overview */}
         {tab === "overview" && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <GC className="p-4 space-y-3" hover={false}>
@@ -1520,7 +1556,6 @@ export default function PropertyNexus() {
                 ))}
               </div>
             </GC>
-
             <div className="space-y-3">
               <GC className="p-4" hover={false}>
                 <h3 className="font-semibold text-white text-sm mb-2" style={{ fontFamily: "'Outfit', sans-serif" }}>Owner</h3>
@@ -1530,24 +1565,22 @@ export default function PropertyNexus() {
                   <div className="flex items-center gap-2"><MapPin size={13} className="text-slate-500" /><span className="text-xs text-slate-300">{lp.pincode || "N/A"}</span></div>
                 </div>
               </GC>
-
               <GC className="p-4" hover={false}>
                 <h3 className="font-semibold text-white text-sm mb-2" style={{ fontFamily: "'Outfit', sans-serif" }}>Change Status</h3>
                 {isAdmin ? (
-                <div className="flex gap-1.5 flex-wrap">
-                  {["available", "on-hold", "sold", "draft"].map((s) => (
-                    <button key={s} onClick={() => updStatus(p.id, s)} disabled={saving}
-                      className={`px-2.5 py-1 rounded-lg text-[10px] font-medium capitalize border
-                        ${lp.status === s ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06] hover:bg-white/[0.08]"}`}>
-                      {s}
-                    </button>
-                  ))}
-                </div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {["available", "on-hold", "sold", "draft"].map((s) => (
+                      <button key={s} onClick={() => updStatus(p.id, s)} disabled={saving}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-medium capitalize border
+                          ${lp.status === s ? "bg-cyan-400/15 text-cyan-400 border-cyan-400/30" : "bg-white/[0.04] text-slate-500 border-white/[0.06] hover:bg-white/[0.08]"}`}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
                 ) : (
                   <p className="text-xs text-slate-600">Admin access required to change status</p>
                 )}
               </GC>
-
               {lp.negotiationNotes && (
                 <GC className="p-4" hover={false}>
                   <h3 className="font-semibold text-white text-sm mb-2" style={{ fontFamily: "'Outfit', sans-serif" }}>Negotiation</h3>
@@ -1557,19 +1590,17 @@ export default function PropertyNexus() {
             </div>
           </div>
         )}
-
-        {/* Tab: Notes */}
         {tab === "notes" && (
           <GC className="p-4 space-y-3" hover={false}>
             <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Internal Notes</h3>
             {isAdmin && (
-            <div className="flex gap-2">
-              <GI placeholder="Add a note..." value={nNote} onChange={(e) => setNNote(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addNote()} />
-              <button onClick={addNote} disabled={sv}
-                className="px-3 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold flex-shrink-0 disabled:opacity-50">
-                {sv ? <Spin size={14} /> : "Add"}
-              </button>
-            </div>
+              <div className="flex gap-2">
+                <GI placeholder="Add a note..." value={nNote} onChange={(e) => setNNote(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addNote()} />
+                <button onClick={addNote} disabled={sv}
+                  className="px-3 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold flex-shrink-0 disabled:opacity-50">
+                  {sv ? <Spin size={14} /> : "Add"}
+                </button>
+              </div>
             )}
             <div className="space-y-2">
               {(lp.notes || []).length === 0 && <p className="text-xs text-slate-600 py-4 text-center">No notes yet</p>}
@@ -1584,23 +1615,21 @@ export default function PropertyNexus() {
             </div>
           </GC>
         )}
-
-        {/* Tab: Buyers */}
         {tab === "buyers" && (
           <GC className="p-4 space-y-3" hover={false}>
             <h3 className="font-semibold text-white text-sm" style={{ fontFamily: "'Outfit', sans-serif" }}>Interested Buyers</h3>
             {isAdmin && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <GI placeholder="Name" value={nBuyer.name} onChange={(e) => setNBuyer({ ...nBuyer, name: e.target.value })} />
-              <GI placeholder="Contact" value={nBuyer.contact} onChange={(e) => setNBuyer({ ...nBuyer, contact: e.target.value })} />
-              <div className="flex gap-2">
-                <GI placeholder="Notes" value={nBuyer.notes} onChange={(e) => setNBuyer({ ...nBuyer, notes: e.target.value })} />
-                <button onClick={addBuy} disabled={sv}
-                  className="px-3 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold flex-shrink-0 disabled:opacity-50">
-                  {sv ? <Spin size={14} /> : "Add"}
-                </button>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <GI placeholder="Name" value={nBuyer.name} onChange={(e) => setNBuyer({ ...nBuyer, name: e.target.value })} />
+                <GI placeholder="Contact" value={nBuyer.contact} onChange={(e) => setNBuyer({ ...nBuyer, contact: e.target.value })} />
+                <div className="flex gap-2">
+                  <GI placeholder="Notes" value={nBuyer.notes} onChange={(e) => setNBuyer({ ...nBuyer, notes: e.target.value })} />
+                  <button onClick={addBuy} disabled={sv}
+                    className="px-3 py-2 bg-gradient-to-r from-cyan-400 to-purple-500 rounded-xl text-slate-900 text-xs font-bold flex-shrink-0 disabled:opacity-50">
+                    {sv ? <Spin size={14} /> : "Add"}
+                  </button>
+                </div>
               </div>
-            </div>
             )}
             <div className="space-y-2">
               {(lp.buyers || []).length === 0 && <p className="text-xs text-slate-600 py-4 text-center">No buyers yet</p>}
@@ -1617,21 +1646,13 @@ export default function PropertyNexus() {
             </div>
           </GC>
         )}
-
-        {/* Tab: Documents */}
         {tab === "documents" && (
-          <DocTab property={lp} showT={showT} />
+          <DocTab property={lp} showT={showT} allProps={props} isAdmin={isAdmin} />
         )}
       </div>
     );
   };
 
-
-  // PropModal rendered as top-level component (see above main fn) to prevent remount on parent re-render
-
-    // ═══════════════════════════════════════════════════════════
-  // FILTER PANEL
-  // ═══════════════════════════════════════════════════════════
   const FilterPanel = () => (
     <GC className="p-3 space-y-2" hover={false}>
       <div className="flex items-center justify-between">
@@ -1674,9 +1695,6 @@ export default function PropertyNexus() {
     </GC>
   );
 
-  // ═══════════════════════════════════════════════════════════
-  // PROPERTIES PAGE
-  // ═══════════════════════════════════════════════════════════
   const PropsPage = () => (
     <div className="space-y-3 animate-[fadeIn_0.3s]">
       {selProp ? <PDetail property={selProp} /> : (
@@ -1698,9 +1716,7 @@ export default function PropertyNexus() {
                 <List size={15} /></button>
             </div>
           </div>
-
           {showFilter && <FilterPanel />}
-
           {viewMode === "grid" ? (
             <div className="grid grid-cols-1 min-[480px]:grid-cols-2 xl:grid-cols-3 gap-3">
               {filtered.map((p) => <PCard key={p.id} property={p} />)}
@@ -1725,21 +1741,20 @@ export default function PropertyNexus() {
                   </div>
                   <p className="font-bold text-cyan-400 text-xs flex-shrink-0">{fmt(p.price)}</p>
                   {isAdmin && (
-                  <div className="hidden sm:flex gap-0.5 opacity-0 group-hover:opacity-100">
-                    <button onClick={(e) => { e.stopPropagation(); togFav(p.id); }}
-                      className={`p-1.5 rounded-lg ${p.isFavorite ? "text-rose-400" : "text-slate-500"}`}>
-                      <Heart size={13} fill={p.isFavorite ? "currentColor" : "none"} /></button>
-                    <button onClick={(e) => { e.stopPropagation(); setEditProp(p); setShowAdd(true); }}
-                      className="p-1.5 rounded-lg text-slate-500 hover:text-white"><Edit size={13} /></button>
-                    <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
-                      className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400"><Trash2 size={13} /></button>
-                  </div>
+                    <div className="hidden sm:flex gap-0.5 opacity-0 group-hover:opacity-100">
+                      <button onClick={(e) => { e.stopPropagation(); togFav(p.id); }}
+                        className={`p-1.5 rounded-lg ${p.isFavorite ? "text-rose-400" : "text-slate-500"}`}>
+                        <Heart size={13} fill={p.isFavorite ? "currentColor" : "none"} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); setEditProp(p); setShowAdd(true); }}
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-white"><Edit size={13} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); delProp(p.id); }}
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400"><Trash2 size={13} /></button>
+                    </div>
                   )}
                 </GC>
               ))}
             </div>
           )}
-
           {filtered.length === 0 && !loading && (
             <div className="text-center py-12">
               <Building2 size={36} className="mx-auto text-slate-700 mb-3" />
@@ -1755,9 +1770,6 @@ export default function PropertyNexus() {
     </div>
   );
 
-  // ═══════════════════════════════════════════════════════════
-  // OTHER PAGES
-  // ═══════════════════════════════════════════════════════════
   const FavsPage = () => {
     const fv = props.filter((p) => p.isFavorite);
     return (
@@ -1777,28 +1789,118 @@ export default function PropertyNexus() {
   };
 
   const DealsPage = () => {
-    const deals = props.filter((p) => (p.buyers || []).length > 0 || p.status === "sold" || p.status === "on-hold");
+    const columns = [
+      { status: "available", label: "Available",  color: "text-emerald-400", border: "border-emerald-400/20", bg: "bg-emerald-400/5"  },
+      { status: "on-hold",   label: "On Hold",    color: "text-amber-400",   border: "border-amber-400/20",   bg: "bg-amber-400/5"    },
+      { status: "sold",      label: "Sold",       color: "text-rose-400",    border: "border-rose-400/20",    bg: "bg-rose-400/5"     },
+      { status: "draft",     label: "Draft",      color: "text-slate-400",   border: "border-slate-400/20",   bg: "bg-slate-400/5"    },
+    ];
+
     return (
       <div className="space-y-3 animate-[fadeIn_0.3s]">
-        <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Deal Tracker</h1>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {["on-hold", "available", "sold"].map((status) => (
-            <div key={status}>
-              <div className="flex items-center gap-2 mb-2"><SB status={status} /><span className="text-[10px] text-slate-500">({deals.filter((d) => d.status === status).length})</span></div>
-              <div className="space-y-2">
-                {deals.filter((d) => d.status === status).map((d) => (
-                  <GC key={d.id} className="p-3" onClick={() => { setSelProp(d); setPage("properties"); }}>
-                    <p className="font-semibold text-xs text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>{d.title}</p>
-                    <p className="text-cyan-400 font-semibold text-xs mt-1">{fmt(d.price)}</p>
-                    {(d.buyers || []).length > 0 && <div className="mt-1">{d.buyers.map((b) => (
-                      <div key={b.id} className="text-[10px] text-slate-500"><User size={9} className="inline mr-1" />{b.name}</div>
-                    ))}</div>}
+        <div>
+          <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Deal Tracker</h1>
+          <p className="text-slate-500 text-xs mt-0.5">{props.length} properties across {columns.length} stages</p>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {columns.map(col => {
+            const colProps = props.filter(p => p.status === col.status);
+            const total = colProps.reduce((s, p) => s + (+p.price || 0), 0);
+            return (
+              <GC key={col.status} className={`p-3 border ${col.border} ${col.bg}`} hover={false}>
+                <p className={`text-xs font-bold ${col.color}`}>{col.label}</p>
+                <p className="text-xl font-bold text-white mt-1" style={{ fontFamily: "'Outfit', sans-serif" }}>{colProps.length}</p>
+                <p className="text-[10px] text-slate-500 mt-0.5">{fmt(total)}</p>
+              </GC>
+            );
+          })}
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+          {columns.map(col => {
+            const colProps = props.filter(p => p.status === col.status);
+            return (
+              <div key={col.status} className="space-y-2">
+                <div className={`flex items-center justify-between px-3 py-2 rounded-xl border ${col.border} ${col.bg}`}>
+                  <span className={`text-xs font-bold ${col.color}`}>{col.label}</span>
+                  <span className="text-[10px] text-slate-500">{colProps.length} properties</span>
+                </div>
+                {colProps.length === 0 && (
+                  <GC className="p-4 text-center" hover={false}>
+                    <p className="text-xs text-slate-600">No properties</p>
+                  </GC>
+                )}
+                {colProps.map(d => (
+                  <GC key={d.id} className="overflow-hidden cursor-pointer"
+                    onClick={() => { setSelProp(d); setPage("properties"); }}>
+                    {d.images?.[d.coverImage || 0] ? (
+                      <div className="h-20 relative overflow-hidden">
+                        <img src={d.images[d.coverImage || 0]} alt={d.title} className="w-full h-full object-cover" onError={e=>e.target.style.opacity='0'} />
+                        <div className="absolute inset-0 bg-gradient-to-t from-[#0a0e1a]/80 to-transparent" />
+                        <div className="absolute bottom-1.5 left-2 right-2">
+                          <p className="text-white text-xs font-bold truncate leading-tight" style={{ fontFamily: "'Outfit', sans-serif" }}>{d.title}</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="h-14 bg-white/[0.03] flex items-center px-3 gap-2">
+                        <Building2 size={14} className="text-slate-600 flex-shrink-0" />
+                        <p className="text-white text-xs font-semibold truncate" style={{ fontFamily: "'Outfit', sans-serif" }}>{d.title}</p>
+                      </div>
+                    )}
+                    <div className="p-2.5 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-cyan-400 font-bold text-sm">{fmt(d.price)}</span>
+                        {d.finalSellingPrice && d.status === "sold" && (
+                          <span className="text-[10px] text-emerald-400 font-medium">Sold {fmt(d.finalSellingPrice)}</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                        <MapPin size={9} />
+                        <span className="truncate">{d.area}{d.city ? `, ${d.city}` : ""}</span>
+                        <span className="text-slate-700">·</span>
+                        <span className="flex-shrink-0">{d.size} {d.sizeUnit}</span>
+                      </div>
+                      {d.owner && (
+                        <div className="flex items-center gap-1 text-[10px] text-slate-500">
+                          <User size={9} />
+                          <span className="truncate">{d.owner}</span>
+                        </div>
+                      )}
+                      {(d.buyers || []).length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {d.buyers.slice(0, 2).map(b => (
+                            <span key={b.id} className="px-1.5 py-0.5 rounded-md text-[9px] bg-purple-400/10 text-purple-300 border border-purple-400/20 truncate max-w-[100px]">
+                              👤 {b.name}
+                            </span>
+                          ))}
+                          {d.buyers.length > 2 && (
+                            <span className="px-1.5 py-0.5 rounded-md text-[9px] bg-white/[0.06] text-slate-400">+{d.buyers.length - 2}</span>
+                          )}
+                        </div>
+                      )}
+                      {d.negotiationNotes && (
+                        <p className="text-[10px] text-slate-500 italic line-clamp-2 pt-0.5 border-t border-white/[0.04]">
+                          "{d.negotiationNotes}"
+                        </p>
+                      )}
+                      {d.soldDate && (
+                        <p className="text-[9px] text-slate-600">Sold on {new Date(d.soldDate).toLocaleDateString()}</p>
+                      )}
+                      {isAdmin && (
+                        <div className="flex gap-1 pt-1.5 border-t border-white/[0.04]" onClick={e => e.stopPropagation()}>
+                          {["available","on-hold","sold"].filter(s => s !== d.status).map(s => (
+                            <button key={s} onClick={() => updStatus(d.id, s)}
+                              className="flex-1 py-1 rounded-lg text-[9px] font-medium capitalize bg-white/[0.04] border border-white/[0.06] text-slate-500 hover:bg-white/[0.08] hover:text-white transition-all">
+                              → {s}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </GC>
                 ))}
-                {deals.filter((d) => d.status === status).length === 0 && <p className="text-xs text-slate-600 text-center py-4">No deals</p>}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     );
@@ -1807,17 +1909,12 @@ export default function PropertyNexus() {
   const MapPage = () => {
     const [selMapProp, setSelMapProp] = useState(null);
     const mappable = props.filter((p) => p.lat && p.lng);
-
-    // Build an OpenStreetMap URL centred on the average of all properties
     const centerLat = mappable.length
       ? (mappable.reduce((s, p) => s + +p.lat, 0) / mappable.length).toFixed(4)
       : "12.9716";
     const centerLng = mappable.length
       ? (mappable.reduce((s, p) => s + +p.lng, 0) / mappable.length).toFixed(4)
       : "77.5946";
-
-    // Build marker string for OSM iframe — one marker per property with colour
-    const statusColor = { available: "green", sold: "red", "on-hold": "orange", draft: "grey" };
 
     return (
       <div className="space-y-3 animate-[fadeIn_0.3s]">
@@ -1827,9 +1924,7 @@ export default function PropertyNexus() {
             <p className="text-slate-500 text-xs mt-0.5">{mappable.length} properties plotted</p>
           </div>
         </div>
-
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-3" style={{ height: "calc(100vh - 220px)", minHeight: "500px" }}>
-          {/* Leaflet map with one marker per property */}
           <div className="lg:col-span-2 rounded-2xl overflow-hidden border border-white/[0.08] relative">
             {mappable.length === 0 ? (
               <div className="w-full h-full min-h-[400px] flex items-center justify-center bg-white/[0.02]">
@@ -1871,8 +1966,6 @@ ${mappable.map((p) => {
               />
             )}
           </div>
-
-          {/* Sidebar: list of all mappable properties */}
           <div className="space-y-2 overflow-y-auto pr-1">
             <p className="text-[10px] text-slate-500 uppercase tracking-wider px-1">All Properties</p>
             {mappable.length === 0 && (
@@ -1913,55 +2006,226 @@ ${mappable.map((p) => {
   };
 
   const DocsPage = () => {
+    const [docFilter, setDocFilter] = useState("all");
+    const [docView, setDocView] = useState("grid");
+    const [docSearch, setDocSearch] = useState("");
+    const [preview, setPreview] = useState(null);
+
     const allDocs = props.flatMap((p) =>
       (p.documents || []).map((d) => ({ ...d, propertyTitle: p.title, propertyId: p.id }))
-    ).sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt));
+    ).sort((a, b) => (b.uploadedAt || "").localeCompare(a.uploadedAt || ""));
 
-    const extIcon = (name = "") => {
-      const ext = (name.split(".").pop() || "").toLowerCase();
-      if (["jpg","jpeg","png","webp","gif"].includes(ext)) return "🖼️";
-      if (ext === "pdf") return "📄";
-      if (["doc","docx"].includes(ext)) return "📝";
-      return "📎";
+    const getDocMeta = (doc) => {
+      const ext = (doc.name || "").split(".").pop().toLowerCase();
+      const mime = doc.type || "";
+      const isImg  = mime.startsWith("image/") || ["jpg","jpeg","png","webp","gif"].includes(ext);
+      const isVid  = mime.startsWith("video/") || ["mp4","mov","avi","webm","mkv"].includes(ext);
+      const isPdf  = ext === "pdf" || mime === "application/pdf";
+      const isDoc  = ["doc","docx"].includes(ext);
+      const kind   = isImg ? "image" : isVid ? "video" : isPdf ? "pdf" : isDoc ? "doc" : "file";
+      return { isImg, isVid, isPdf, isDoc, kind,
+        label: isImg ? "Image" : isVid ? "Video" : isPdf ? "PDF" : isDoc ? "Doc" : "File",
+        color: isImg ? "text-emerald-400 bg-emerald-400/10 border-emerald-400/20"
+             : isVid ? "text-purple-400 bg-purple-400/10 border-purple-400/20"
+             : isPdf ? "text-rose-400 bg-rose-400/10 border-rose-400/20"
+             : "text-cyan-400 bg-cyan-400/10 border-cyan-400/20",
+      };
     };
+
+    const typeCounts = {
+      all: allDocs.length,
+      image: allDocs.filter(d => getDocMeta(d).isImg).length,
+      video: allDocs.filter(d => getDocMeta(d).isVid).length,
+      pdf:   allDocs.filter(d => getDocMeta(d).isPdf).length,
+      doc:   allDocs.filter(d => getDocMeta(d).isDoc).length,
+    };
+
+    const filtered = allDocs.filter(d => {
+      const meta = getDocMeta(d);
+      if (docFilter !== "all" && meta.kind !== docFilter) return false;
+      if (docSearch) {
+        const q = docSearch.toLowerCase();
+        if (!(d.name||"").toLowerCase().includes(q) && !(d.propertyTitle||"").toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
 
     return (
       <div className="space-y-3 animate-[fadeIn_0.3s]">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents</h1>
-          <p className="text-slate-500 text-xs mt-0.5">{allDocs.length} files across {props.filter(p => (p.documents||[]).length > 0).length} properties</p>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Documents</h1>
+            <p className="text-slate-500 text-xs mt-0.5">
+              {allDocs.length} files across {props.filter(p => (p.documents||[]).length > 0).length} properties
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+              <input
+                placeholder="Search files…"
+                value={docSearch}
+                onChange={e => setDocSearch(e.target.value)}
+                className="bg-white/[0.06] border border-white/10 rounded-xl pl-7 pr-3 py-2 text-slate-100 text-xs
+                  placeholder:text-slate-600 focus:outline-none focus:border-cyan-400/50 w-36"
+              />
+            </div>
+            <button onClick={() => setDocView("grid")} className={`p-2 rounded-xl border text-xs ${docView==="grid"?"bg-cyan-400/10 text-cyan-400 border-cyan-400/20":"bg-white/[0.04] text-slate-400 border-white/[0.08]"}`}>⊞</button>
+            <button onClick={() => setDocView("list")} className={`p-2 rounded-xl border text-xs ${docView==="list"?"bg-cyan-400/10 text-cyan-400 border-cyan-400/20":"bg-white/[0.04] text-slate-400 border-white/[0.08]"}`}>≡</button>
+          </div>
         </div>
+        {allDocs.length > 0 && (
+          <div className="flex gap-1.5 flex-wrap">
+            {[
+              { k: "all",   l: "All",    c: "text-slate-400" },
+              { k: "image", l: "Images", c: "text-emerald-400" },
+              { k: "video", l: "Videos", c: "text-purple-400" },
+              { k: "pdf",   l: "PDFs",   c: "text-rose-400" },
+              { k: "doc",   l: "Docs",   c: "text-cyan-400" },
+            ].filter(t => t.k === "all" || typeCounts[t.k] > 0).map(t => (
+              <button key={t.k} onClick={() => setDocFilter(t.k)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-all
+                  ${docFilter === t.k
+                    ? "bg-white/10 text-white border-white/20"
+                    : "bg-white/[0.03] border-white/[0.06] text-slate-500 hover:text-slate-300"}`}>
+                <span className={docFilter === t.k ? "text-white" : t.c}>{t.l}</span>
+                <span className="ml-1.5 text-[10px] opacity-60">{typeCounts[t.k]}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {allDocs.length === 0 ? (
           <GC className="p-10 text-center" hover={false}>
             <FolderOpen size={36} className="mx-auto text-slate-600 mb-3" />
             <p className="text-slate-400 text-sm">No documents yet</p>
             <p className="text-slate-600 text-xs mt-1">Open a property → Documents tab to upload files</p>
           </GC>
+        ) : filtered.length === 0 ? (
+          <GC className="p-8 text-center" hover={false}>
+            <p className="text-slate-500 text-sm">No files match your filter</p>
+            <button onClick={() => { setDocFilter("all"); setDocSearch(""); }} className="text-cyan-400 text-xs mt-2">Clear filters</button>
+          </GC>
+        ) : docView === "grid" ? (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2">
+            {filtered.map((doc) => {
+              const meta = getDocMeta(doc);
+              return (
+                <div key={doc.id} className="relative group rounded-xl overflow-hidden border border-white/[0.06] bg-white/[0.03] cursor-pointer">
+                  {meta.isImg ? (
+                    <div className="h-28 bg-slate-800 overflow-hidden">
+                      <img src={doc.url} alt={doc.name} className="w-full h-full object-cover" onError={e=>e.target.style.opacity='0'} />
+                    </div>
+                  ) : meta.isVid ? (
+                    <div className="h-28 bg-slate-800 flex items-center justify-center relative overflow-hidden">
+                      {doc.thumbnailUrl && <img src={doc.thumbnailUrl} alt="" className="absolute inset-0 w-full h-full object-cover opacity-40" />}
+                      <div className="relative z-10 w-10 h-10 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center">
+                        <span className="text-white text-sm ml-0.5">▶</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className={`h-28 flex flex-col items-center justify-center gap-2 ${meta.color}`}>
+                      <FileText size={32} />
+                      <span className="text-[11px] font-bold uppercase tracking-wider">{meta.label}</span>
+                    </div>
+                  )}
+                  <div className="p-2">
+                    <p className="text-[10px] text-slate-300 truncate font-medium leading-tight">{doc.name}</p>
+                    <p className="text-[9px] text-slate-600 mt-0.5 truncate">{doc.propertyTitle}</p>
+                  </div>
+                  <div
+                    className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-2 p-2 cursor-pointer"
+                    onClick={() => meta.isImg || meta.isVid ? setPreview({ url: doc.url, name: doc.name, isVid: meta.isVid, thumb: doc.thumbnailUrl }) : window.open(doc.url, "_blank")}
+                  >
+                    <p className="text-[10px] text-white text-center font-medium leading-tight">{doc.name}</p>
+                    <p className="text-[9px] text-slate-400 text-center">{doc.propertyTitle}</p>
+                    <div className="flex gap-1.5 mt-1">
+                      <span className="px-2.5 py-1.5 rounded-lg bg-cyan-400/20 text-cyan-300 text-[10px] font-medium flex items-center gap-1">
+                        {meta.isImg ? <><Eye size={11} /> Preview</> : meta.isVid ? <>▶ Play</> : <><Eye size={11} /> Open</>}
+                      </span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setSelProp(props.find(x => x.id === doc.propertyId)); setPage("properties"); }}
+                        className="px-2.5 py-1.5 rounded-lg bg-white/10 text-slate-300 text-[10px] font-medium hover:bg-white/20 transition-all flex items-center gap-1">
+                        <Building2 size={11} /> Property
+                      </button>
+                    </div>
+                  </div>
+                  <span className={`absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase border ${meta.color}`}>
+                    {meta.label}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         ) : (
-          <div className="space-y-2">
-            {allDocs.map((doc) => (
-              <GC key={doc.id} className="p-3 flex items-center gap-3" hover={false}>
-                <div className="w-9 h-9 rounded-xl bg-cyan-400/10 flex items-center justify-center flex-shrink-0 text-lg">
-                  {extIcon(doc.name)}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-white truncate">{doc.name}</p>
-                  <p className="text-[10px] text-slate-500 truncate">
-                    {doc.propertyTitle} · {new Date(doc.uploadedAt).toLocaleDateString()}
-                  </p>
-                </div>
-                <div className="flex gap-1.5 flex-shrink-0">
-                  <button onClick={() => { setSelProp(props.find(p => p.id === doc.propertyId)); setPage("properties"); }}
-                    className="p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-slate-500 hover:text-cyan-400 transition-all">
-                    <Building2 size={12} />
-                  </button>
-                  <a href={doc.url} target="_blank" rel="noopener noreferrer"
-                    className="p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-slate-500 hover:text-white transition-all">
-                    <Eye size={12} />
-                  </a>
-                </div>
-              </GC>
-            ))}
+          <div className="space-y-1.5">
+            {filtered.map((doc) => {
+              const meta = getDocMeta(doc);
+              return (
+                <GC key={doc.id} className="p-3 flex items-center gap-3" hover={false}>
+                  {meta.isImg ? (
+                    <div className="w-11 h-11 rounded-xl flex-shrink-0 border border-white/[0.06] overflow-hidden">
+                      <img src={doc.url} alt={doc.name} className="w-full h-full object-cover" onError={e=>e.target.style.opacity='0'} />
+                    </div>
+                  ) : meta.isVid ? (
+                    <div className="w-11 h-11 rounded-xl bg-slate-800 flex items-center justify-center flex-shrink-0 border border-white/[0.06] relative overflow-hidden">
+                      {doc.thumbnailUrl && <img src={doc.thumbnailUrl} alt="" className="absolute inset-0 w-full h-full object-cover opacity-40" />}
+                      <span className="relative text-white text-xs">▶</span>
+                    </div>
+                  ) : (
+                    <div className={`w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 border ${meta.color}`}>
+                      <FileText size={18} />
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-white truncate">{doc.name}</p>
+                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                      <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-md border ${meta.color}`}>{meta.label}</span>
+                      <span className="text-[10px] text-slate-500">{doc.propertyTitle}</span>
+                      <span className="text-[10px] text-slate-600">· {new Date(doc.uploadedAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                  <div className="flex gap-1.5 flex-shrink-0">
+                    <button onClick={() => { setSelProp(props.find(x => x.id === doc.propertyId)); setPage("properties"); }}
+                      className="p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-slate-500 hover:text-cyan-400 transition-all">
+                      <Building2 size={12} />
+                    </button>
+                    <a href={doc.url} target="_blank" rel="noopener noreferrer"
+                      className="p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-slate-500 hover:text-white transition-all">
+                      <Eye size={12} />
+                    </a>
+                  </div>
+                </GC>
+              );
+            })}
+          </div>
+        )}
+        {preview && (
+          <div
+            className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-md flex items-center justify-center p-4"
+            onClick={() => setPreview(null)}
+          >
+            <button
+              className="absolute top-4 right-4 w-10 h-10 rounded-xl bg-white/10 border border-white/10 flex items-center justify-center text-white hover:bg-white/20 transition-all z-10"
+              onClick={() => setPreview(null)}
+            >
+              <X size={18} />
+            </button>
+            <div className="max-w-4xl w-full max-h-[85vh] flex flex-col items-center gap-3" onClick={e => e.stopPropagation()}>
+              {preview.isVid ? (
+                <video controls autoPlay className="max-h-[75vh] w-full rounded-2xl bg-black" poster={preview.thumb || undefined}>
+                  <source src={preview.url} />
+                </video>
+              ) : (
+                <img src={preview.url} alt={preview.name} className="max-h-[75vh] max-w-full object-contain rounded-2xl" />
+              )}
+              <div className="flex items-center gap-3">
+                <p className="text-sm text-slate-300 font-medium">{preview.name}</p>
+                <a href={preview.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+                  className="px-3 py-1.5 rounded-xl bg-white/10 border border-white/10 text-xs text-white hover:bg-white/20 transition-all flex items-center gap-1.5">
+                  <Eye size={13} /> Open original
+                </a>
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -2050,7 +2314,6 @@ ${mappable.map((p) => {
     const [fbUsers, setFbUsers] = useState([]);
     useEffect(() => {
       const unsub = fbSub("users", (data) => {
-        // Sort: admins first, then by lastSeen desc
         data.sort((a, b) => {
           if (a.role === "admin" && b.role !== "admin") return -1;
           if (b.role === "admin" && a.role !== "admin") return 1;
@@ -2073,8 +2336,6 @@ ${mappable.map((p) => {
           <h1 className="text-xl sm:text-2xl font-bold text-white" style={{ fontFamily: "'Outfit', sans-serif" }}>Users</h1>
           <p className="text-slate-500 text-xs mt-0.5">{fbUsers.length} registered user{fbUsers.length !== 1 ? "s" : ""} · admins can edit properties</p>
         </div>
-
-        {/* Role legend */}
         <GC className="p-3 flex flex-wrap gap-3" hover={false}>
           <div className="flex items-center gap-2 text-xs text-slate-400">
             <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-cyan-400/15 text-cyan-400">admin</span>
@@ -2085,7 +2346,6 @@ ${mappable.map((p) => {
             Read-only — browse and search only
           </div>
         </GC>
-
         <div className="space-y-2">
           {fbUsers.length === 0 && (
             <GC className="p-10 text-center" hover={false}>
@@ -2118,7 +2378,6 @@ ${mappable.map((p) => {
             </GC>
           ))}
         </div>
-
         {isAdmin && (
           <GC className="p-4" hover={false}>
             <h3 className="font-semibold text-xs text-white mb-2 flex items-center gap-2" style={{ fontFamily: "'Outfit', sans-serif" }}>
@@ -2169,9 +2428,6 @@ ${mappable.map((p) => {
     </div>
   );
 
-  // ═══════════════════════════════════════════════════════════
-  // PAGE ROUTER
-  // ═══════════════════════════════════════════════════════════
   const renderPage = () => {
     if (loading) {
       return (
@@ -2195,11 +2451,6 @@ ${mappable.map((p) => {
     }
   };
 
-  // ═══════════════════════════════════════════════════════════
-  // RENDER
-  // ═══════════════════════════════════════════════════════════
-
-  // While waiting for Firebase to confirm auth state
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#0a0e1a] flex items-center justify-center">
@@ -2211,7 +2462,6 @@ ${mappable.map((p) => {
     );
   }
 
-  // Not logged in → show auth screen
   if (!currentUser) {
     return (
       <AuthScreen
@@ -2224,7 +2474,6 @@ ${mappable.map((p) => {
 
   return (
     <div className="min-h-screen bg-[#0a0e1a] text-slate-100" style={{ fontFamily: "'DM Sans', sans-serif" }}>
-      {/* eslint-disable-next-line @next/next/no-css-tags */}
       <style jsx global>{`
         @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap');
         @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
@@ -2235,22 +2484,16 @@ ${mappable.map((p) => {
         .line-clamp-2 { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
         select option { background: #111827; color: #e2e8f0; }
       `}</style>
-
-      {/* Ambient Background */}
       <div className="fixed inset-0 pointer-events-none z-0" style={{
         background: "radial-gradient(ellipse at 20% 50%, rgba(0,240,255,0.05) 0%, transparent 50%), radial-gradient(ellipse at 80% 20%, rgba(168,85,247,0.04) 0%, transparent 50%), radial-gradient(ellipse at 50% 80%, rgba(52,211,153,0.03) 0%, transparent 50%)"
       }} />
-
       <SidebarComp />
-
       <div className="lg:ml-[260px]">
         <TopBar />
-        <MobSrch />
         <main className="p-3 sm:p-4 md:p-6 relative z-10">
           {renderPage()}
         </main>
       </div>
-
       {showAdd && (
         <PropModal
           editProp={editProp}
@@ -2258,12 +2501,11 @@ ${mappable.map((p) => {
           showT={showT}
           saveProp={saveProp}
           currentUser={currentUser}
+          isAdmin={isAdmin}
           onClose={() => { setShowAdd(false); setEditProp(null); }}
         />
       )}
       {showNotif && <div className="fixed inset-0 z-20" onClick={() => setShowNotif(false)} />}
-
-      {/* Toast */}
       {toast && (
         <div className={`fixed bottom-4 right-4 z-[100] flex items-center gap-3 px-4 py-3 rounded-xl border
           backdrop-blur-2xl shadow-2xl animate-[slideUp_0.3s]
